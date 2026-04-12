@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Approve builds
+        run: pnpm config set onlyBuiltDependencies '["better-sqlite3","esbuild","sharp","unrs-resolver"]'
+
+      - name: Typecheck (shared)
+        run: pnpm --filter @jarvis/shared build
+
+      - name: Typecheck (api)
+        run: pnpm --filter @jarvis/api build
+
+      - name: Lint (web)
+        run: pnpm --filter @jarvis/web lint
+
+      - name: Build (web)
+        run: pnpm --filter @jarvis/web build
+
+      - name: Health check
+        run: echo "All packages build successfully ✓"

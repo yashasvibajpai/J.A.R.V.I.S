@@ -1,0 +1,53 @@
+# ─── API Backend ──────────────────────────────────────────────────────────────
+# Build and run the JARVIS API server
+#
+# Usage:
+#   docker build -t jarvis-api -f Dockerfile.api .
+#   docker run -p 3001:3001 --env-file packages/api/.env jarvis-api
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM node:20-slim AS base
+
+RUN corepack enable && corepack prepare pnpm@10 --activate
+
+WORKDIR /app
+
+# ─── Install dependencies ────────────────────────────────────────────────────
+
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY packages/shared/package.json packages/shared/
+COPY packages/config/package.json packages/config/
+COPY packages/api/package.json packages/api/
+
+RUN pnpm install --frozen-lockfile
+
+# ─── Copy source ─────────────────────────────────────────────────────────────
+
+COPY packages/shared/ packages/shared/
+COPY packages/config/ packages/config/
+COPY packages/api/ packages/api/
+
+# ─── Build ───────────────────────────────────────────────────────────────────
+
+RUN pnpm --filter @jarvis/shared build
+RUN pnpm --filter @jarvis/api build
+
+# ─── Runtime ─────────────────────────────────────────────────────────────────
+
+FROM node:20-slim AS runtime
+
+RUN corepack enable && corepack prepare pnpm@10 --activate
+
+WORKDIR /app
+
+COPY --from=base /app/ ./
+
+# Data directory for SQLite databases
+RUN mkdir -p packages/api/data
+
+EXPOSE 3001
+
+ENV NODE_ENV=production
+ENV PORT=3001
+
+CMD ["pnpm", "--filter", "@jarvis/api", "start"]

@@ -1,0 +1,3 @@
+module.exports=[16385,a=>{"use strict";var b=a.i(74629);a.s(["default",0,function({children:a}){return(0,b.jsx)("html",{lang:"en",children:(0,b.jsx)("body",{children:a})})},"metadata",0,{title:"J.A.R.V.I.S — Personal AI Assistant",description:"Just A Rather Very Intelligent System — your personal AI assistant that remembers, learns, and evolves with you.",manifest:"/manifest.json",icons:{icon:"/favicon.ico"}},"viewport",0,{themeColor:"#0a0e17",width:"device-width",initialScale:1,maximumScale:1}])},6449,a=>{a.n(a.i(16385))}];
+
+//# sourceMappingURL=packages_web_src_app_layout_tsx_08hwhfg._.js.map
