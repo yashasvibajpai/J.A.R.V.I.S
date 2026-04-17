@@ -22,7 +22,7 @@ const metadata = {
     }
 };
 const viewport = {
-    themeColor: "#0a0e17",
+    themeColor: "#03080e",
     width: "device-width",
     initialScale: 1,
     maximumScale: 1

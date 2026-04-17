@@ -4,3 +4,19 @@ dist/
 *.log
 packages/ai/venv/
 packages/api/data/
+packages/data/
+
+# Next.js
+.next/
+packages/web/.next/
+
+# Databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Mac
+.DS_Store

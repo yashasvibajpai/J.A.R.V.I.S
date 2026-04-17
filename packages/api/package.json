@@ -21,7 +21,8 @@
     "js-yaml": "^4.1.0",
     "openai": "^5.1.0",
     "ollama": "^0.5.16",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "googleapis": "^144.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

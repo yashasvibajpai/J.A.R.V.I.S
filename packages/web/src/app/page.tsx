@@ -24,6 +24,23 @@ interface Memory {
   createdAt: string;
 }
 
+interface Task {
+  id: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  priority: 'low' | 'medium' | 'high';
+  dueDate?: string;
+  tags: string[];
+}
+
+interface Reminder {
+  id: string;
+  description: string;
+  triggerTime?: string;
+  triggerContext?: string;
+  completed: boolean;
+}
+
 interface UserProfile {
   name: string;
   preferredName?: string;
@@ -43,8 +60,10 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [activePanel, setActivePanel] = useState<"chat" | "profile" | "memory">("chat");
+  const [activePanel, setActivePanel] = useState<"chat" | "profile" | "memory" | "tasks">("chat");
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [memoryCount, setMemoryCount] = useState(0);
 
@@ -176,11 +195,26 @@ export default function Home() {
     }
   }, []);
 
+  const loadTasksAndReminders = useCallback(async () => {
+    try {
+      const [taskRes, remRes] = await Promise.all([
+        fetch(`${API_URL}/api/tasks`),
+        fetch(`${API_URL}/api/reminders`)
+      ]);
+      const [taskData, remData] = await Promise.all([taskRes.json(), remRes.json()]);
+      setTasks(taskData.tasks || []);
+      setReminders(remData.reminders || []);
+    } catch {
+      /* silent */
+    }
+  }, []);
+
   // Load on panel switch
   useEffect(() => {
     if (activePanel === "profile") loadProfile();
     if (activePanel === "memory") loadMemories();
-  }, [activePanel, loadProfile, loadMemories]);
+    if (activePanel === "tasks") loadTasksAndReminders();
+  }, [activePanel, loadProfile, loadMemories, loadTasksAndReminders]);
 
   // Initial load for memory count
   useEffect(() => {
@@ -235,10 +269,10 @@ export default function Home() {
             👤 Profile
           </button>
           <button
-            className={`sidebar-nav-item ${activePanel === "memory" ? "active" : ""}`}
-            onClick={() => { setActivePanel("memory"); setSidebarOpen(false); }}
+            className={`sidebar-nav-item ${activePanel === "tasks" ? "active" : ""}`}
+            onClick={() => { setActivePanel("tasks"); setSidebarOpen(false); }}
           >
-            🧠 Memory ({memoryCount})
+            ☑️ Tasks
           </button>
         </nav>
 
@@ -249,6 +283,9 @@ export default function Home() {
           )}
           {activePanel === "memory" && (
             <MemoryPanel memories={memories} />
+          )}
+          {activePanel === "tasks" && (
+            <TaskPanel tasks={tasks} reminders={reminders} />
           )}
           {activePanel === "chat" && (
             <div className="empty-state">
@@ -272,7 +309,13 @@ export default function Home() {
       <main className="main-content">
         {messages.length === 0 ? (
           <div className="welcome">
-            <div className="welcome-logo">J</div>
+            <div className="arc-reactor">
+              <div className="arc-ring arc-outer"></div>
+              <div className="arc-ring arc-middle dashed"></div>
+              <div className="arc-ring arc-inner"></div>
+              <div className="arc-core">
+              </div>
+            </div>
             <h1>J.A.R.V.I.S</h1>
             <p>
               Good {getTimeOfDay()}. How may I be of assistance?
@@ -457,10 +500,55 @@ function MemoryPanel({ memories }: { memories: Memory[] }) {
   );
 }
 
+function TaskPanel({ tasks, reminders }: { tasks: Task[]; reminders: Reminder[] }) {
+  const pendingTasks = tasks.filter(t => t.status === 'pending');
+  
+  return (
+    <>
+      <div className="sidebar-section-title">
+        Open Tasks ({pendingTasks.length})
+      </div>
+      {pendingTasks.length === 0 ? (
+         <div className="empty-state">No open tasks. You&apos;re all caught up!</div>
+      ) : (
+         pendingTasks.map((t) => (
+           <div key={t.id} className="memory-item">
+             <div className="memory-category" style={{color: 'var(--accent)'}}>{t.priority} priority</div>
+             <div className="memory-content" style={{fontSize: '15px'}}>{t.description}</div>
+             {t.dueDate && <div className="memory-date">Due: {t.dueDate}</div>}
+           </div>
+         ))
+      )}
+
+      <div className="sidebar-section-title" style={{ marginTop: '24px' }}>
+        Active Reminders ({reminders.length})
+      </div>
+      {reminders.length === 0 ? (
+         <div className="empty-state">No active reminders.</div>
+      ) : (
+         reminders.map((r) => (
+           <div key={r.id} className="memory-item">
+             <div className="memory-content">⏰ {r.description}</div>
+             {(r.triggerTime || r.triggerContext) && (
+                <div className="memory-date">Trigger: {r.triggerTime || r.triggerContext}</div>
+             )}
+           </div>
+         ))
+      )}
+    </>
+  );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function getTimeOfDay(): string {
-  const hour = new Date().getHours();
+  // Convert current time to IST explicitly
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    hour12: false,
+  });
+  const hour = parseInt(formatter.format(new Date()), 10);
   if (hour < 12) return "morning";
   if (hour < 17) return "afternoon";
   return "evening";
