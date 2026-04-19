@@ -9,10 +9,12 @@ import type { LLMProvider, LLMOptions, LLMCapabilities, Message } from '@jarvis/
 export class OllamaAdapter implements LLMProvider {
   private client: Ollama;
   private model: string;
+  private embedModel: string;
 
-  constructor(host = 'http://localhost:11434', model = 'gemma3:4b') {
+  constructor(host = 'http://localhost:11434', model = 'gemma3:4b', embedModel = 'nomic-embed-text') {
     this.client = new Ollama({ host });
     this.model = model;
+    this.embedModel = embedModel;
   }
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
@@ -49,11 +51,16 @@ export class OllamaAdapter implements LLMProvider {
   }
 
   async embed(text: string): Promise<number[]> {
-    const response = await this.client.embed({
-      model: this.model,
-      input: text,
+    const response = await this.client.embeddings({
+      model: this.embedModel,
+      prompt: text,
     });
-    return response.embeddings[0] ?? [];
+    const vec = response.embedding ?? [];
+    if (vec.length === 0) return vec;
+    
+    // Normalize vector to length 1 so LanceDB's L2 metric mathematically matches true Cosine Similarity
+    const magnitude = Math.sqrt(vec.reduce((sum, val) => sum + val * val, 0));
+    return vec.map((val) => val / magnitude);
   }
 
   getCapabilities(): LLMCapabilities {

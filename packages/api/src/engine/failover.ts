@@ -74,6 +74,28 @@ export class FailoverChain implements LLMProvider {
     );
   }
 
+  async embed(text: string): Promise<number[]> {
+    let lastError: Error | null = null;
+    
+    for (const provider of this.providers) {
+      if (!provider.embed) continue;
+      
+      const caps = provider.getCapabilities();
+      try {
+        console.log(`[failover] embedding via ${caps.providerId}...`);
+        const vector = await provider.embed(text);
+        return vector;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        console.warn(`[failover] ✗ ${caps.providerId} embedding failed: ${lastError.message}`);
+      }
+    }
+
+    throw new Error(
+      `All capable providers failed to generate embeddings. Last error: ${lastError?.message}`
+    );
+  }
+
   getCapabilities(): LLMCapabilities {
     // Report capabilities of the first (primary) provider
     return this.providers[0].getCapabilities();

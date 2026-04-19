@@ -20,11 +20,14 @@ import { memoryRecallMiddleware, memoryExtractionMiddleware } from './engine/mem
 import { profileInjectionMiddleware, profileExtractionMiddleware } from './engine/profile-middleware.js';
 import { taskRecallMiddleware, taskExtractionMiddleware } from './engine/task-middleware.js';
 import { calendarMiddleware } from './engine/calendar-middleware.js';
+import { knowledgeMiddleware } from './engine/knowledge-middleware.js';
 import { SQLiteMemoryStore } from './stores/SQLiteMemoryStore.js';
 import { SQLiteProfileStore } from './stores/SQLiteProfileStore.js';
 import { SQLiteTaskStore } from './stores/SQLiteTaskStore.js';
 import { SQLiteReminderStore } from './stores/SQLiteReminderStore.js';
 import { SQLiteCaptureStore } from './stores/SQLiteCaptureStore.js';
+import { LanceVectorStore } from './stores/LanceVectorStore.js';
+import { ObsidianCrawler } from './services/ObsidianCrawler.js';
 import { observabilityMiddleware } from './engine/observability.js';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -96,14 +99,22 @@ const reminderStore = new SQLiteReminderStore(resolve(DATA_DIR, 'reminders.db'))
 const captureStore = new SQLiteCaptureStore(resolve(DATA_DIR, 'captures.db'));
 console.log('[init] ✓ Task, Reminder & Capture stores initialised (SQLite)');
 
+const vectorStore = new LanceVectorStore(resolve(DATA_DIR, 'lancedb'));
+await vectorStore.init();
+console.log('[init] ✓ Knowledge store initialised (LanceDB)');
+
+const vaultPath = process.env.OBSIDIAN_VAULT_PATH || '';
+const obsidianCrawler = new ObsidianCrawler(vaultPath, chain, vectorStore);
+
 // Build the message pipeline
-// Order: observe → system prompt → calendar → profile → memory → taskRecall → LLM → memoryExtract → taskExtract → profileUpdate
+// Order: observe → system prompt → calendar → profile → memory → knowledgeRAG → taskRecall → LLM → ...
 const pipeline = new Pipeline()
   .use(observabilityMiddleware())
   .use(systemPromptMiddleware(systemPrompt))
   .use(calendarMiddleware(profileStore))
   .use(profileInjectionMiddleware(profileStore))
   .use(memoryRecallMiddleware(memoryStore))
+  .use(knowledgeMiddleware(vectorStore, chain))
   .use(taskRecallMiddleware(taskStore, reminderStore))
   .use(llmCallMiddleware(chain))
   .use(memoryExtractionMiddleware(memoryStore, chain))
@@ -268,6 +279,21 @@ app.get('/api/reminders', async (_req: Request, res: Response) => {
 app.get('/api/captures', async (_req: Request, res: Response) => {
   const captures = await captureStore.getUnprocessedCaptures();
   res.json({ captures, count: captures.length });
+});
+
+// ─── Knowledge Endpoints ────────────────────────────────────────────────────────
+
+app.post('/api/knowledge/sync', async (_req: Request, res: Response) => {
+  try {
+     if (!process.env.OBSIDIAN_VAULT_PATH) {
+        res.status(400).json({ error: 'OBSIDIAN_VAULT_PATH not set in .env' });
+        return;
+     }
+     const result = await obsidianCrawler.syncVault();
+     res.json(result);
+  } catch(e: any) {
+     res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── OAuth Endpoints ─────────────────────────────────────────────────────────
