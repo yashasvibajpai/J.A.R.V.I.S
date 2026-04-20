@@ -3,16 +3,19 @@ import path from 'path';
 import matter from 'gray-matter';
 import { createHash } from 'crypto';
 import type { LLMProvider, VectorStore } from '@jarvis/shared';
+import { SQLiteSyncStore } from '../stores/SQLiteSyncStore.js';
 
 export class ObsidianCrawler {
   private vaultPath: string;
   private llm: LLMProvider;
   private vectorStore: VectorStore;
+  private syncStore: SQLiteSyncStore;
 
-  constructor(vaultPath: string, llm: LLMProvider, vectorStore: VectorStore) {
+  constructor(vaultPath: string, llm: LLMProvider, vectorStore: VectorStore, syncStore: SQLiteSyncStore) {
     this.vaultPath = vaultPath;
     this.llm = llm;
     this.vectorStore = vectorStore;
+    this.syncStore = syncStore;
   }
 
   /**
@@ -39,14 +42,17 @@ export class ObsidianCrawler {
 
         const content = fs.readFileSync(file, 'utf-8');
         const fileHash = this.hashContent(content);
+        const relativePath = path.relative(this.vaultPath, file);
 
-        // In a rigorous implementation, we would query the table to see if fileHash matches.
-        // For Phase 1 of RAG, we will forcefully upsert all files to build the index.
-        // (Optimization task: track sync states in SQLite)
+        // Check against the SyncStore to skip unchanged files
+        const existingHash = this.syncStore.getHash(relativePath);
+        if (existingHash === fileHash) {
+          skipped++;
+          continue;
+        }
 
         const parsed = matter(content);
         const text = parsed.content;
-        const relativePath = path.relative(this.vaultPath, file);
         const fileName = path.basename(file, '.md');
 
         // Simple chunking (by paragraphs/headings)
@@ -87,6 +93,10 @@ export class ObsidianCrawler {
           
           totalChunks++;
         }
+        
+        // Mark file as completely synced
+        this.syncStore.setHash(relativePath, fileHash);
+        
         synced++;
         console.log(`[obsidian] Synced: ${fileName} (${chunks.length} chunks)`);
       } catch (err) {

@@ -21,11 +21,14 @@ import { profileInjectionMiddleware, profileExtractionMiddleware } from './engin
 import { taskRecallMiddleware, taskExtractionMiddleware } from './engine/task-middleware.js';
 import { calendarMiddleware } from './engine/calendar-middleware.js';
 import { knowledgeMiddleware } from './engine/knowledge-middleware.js';
+import { tokenTruncationMiddleware } from './engine/token-middleware.js';
 import { SQLiteMemoryStore } from './stores/SQLiteMemoryStore.js';
 import { SQLiteProfileStore } from './stores/SQLiteProfileStore.js';
 import { SQLiteTaskStore } from './stores/SQLiteTaskStore.js';
 import { SQLiteReminderStore } from './stores/SQLiteReminderStore.js';
 import { SQLiteCaptureStore } from './stores/SQLiteCaptureStore.js';
+import { SQLiteSyncStore } from './stores/SQLiteSyncStore.js';
+import { SQLiteSessionStore } from './stores/SQLiteSessionStore.js';
 import { LanceVectorStore } from './stores/LanceVectorStore.js';
 import { ObsidianCrawler } from './services/ObsidianCrawler.js';
 import { observabilityMiddleware } from './engine/observability.js';
@@ -101,10 +104,14 @@ console.log('[init] ✓ Task, Reminder & Capture stores initialised (SQLite)');
 
 const vectorStore = new LanceVectorStore(resolve(DATA_DIR, 'lancedb'));
 await vectorStore.init();
-console.log('[init] ✓ Knowledge store initialised (LanceDB)');
+
+const syncStore = new SQLiteSyncStore(resolve(DATA_DIR, 'obsidian_sync.db'));
+const sessionStore = new SQLiteSessionStore(resolve(DATA_DIR, 'sessions.db'));
+
+console.log('[init] ✓ Knowledge store initialised (LanceDB & SQLite Sync)');
 
 const vaultPath = process.env.OBSIDIAN_VAULT_PATH || '';
-const obsidianCrawler = new ObsidianCrawler(vaultPath, chain, vectorStore);
+const obsidianCrawler = new ObsidianCrawler(vaultPath, chain, vectorStore, syncStore);
 
 // Build the message pipeline
 // Order: observe → system prompt → calendar → profile → memory → knowledgeRAG → taskRecall → LLM → ...
@@ -116,6 +123,7 @@ const pipeline = new Pipeline()
   .use(memoryRecallMiddleware(memoryStore))
   .use(knowledgeMiddleware(vectorStore, chain))
   .use(taskRecallMiddleware(taskStore, reminderStore))
+  .use(tokenTruncationMiddleware(6000))
   .use(llmCallMiddleware(chain))
   .use(memoryExtractionMiddleware(memoryStore, chain))
   .use(taskExtractionMiddleware(taskStore, reminderStore, captureStore, chain))
@@ -151,9 +159,10 @@ app.get('/health/providers', async (_req: Request, res: Response) => {
 // Chat endpoint
 app.post('/api/chat', async (req: Request, res: Response) => {
   try {
-    const { message, history } = req.body as {
+    const { message, history, sessionId: reqSessionId } = req.body as {
       message: string;
       history?: Message[];
+      sessionId?: string;
     };
 
     if (!message || typeof message !== 'string') {
@@ -161,9 +170,32 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       return;
     }
 
-    console.log(`\n[chat] user: "${message.substring(0, 80)}${message.length > 80 ? '...' : ''}"`);
+    // Determine Session 
+    let sessionId = reqSessionId;
+    let actualHistory = history ?? [];
 
-    const result = await pipeline.run(message, history ?? []);
+    if (sessionId) {
+      actualHistory = sessionStore.getMessages(sessionId);
+    } else {
+      // Create a new session on first chat, extracting a simple title
+      const title = message.length > 30 ? message.substring(0, 30) + '...' : message;
+      const s = sessionStore.createSession(title);
+      sessionId = s.id;
+    }
+
+    // Persist User Message Immediately
+    if (sessionId) {
+      sessionStore.appendMessage(sessionId, { role: 'user', content: message });
+    }
+
+    console.log(`\n[chat] session: ${sessionId} | user: "${message.substring(0, 80)}${message.length > 80 ? '...' : ''}"`);
+
+    const result = await pipeline.run(message, actualHistory);
+
+    // Persist Assistant Response Immediately
+    if (sessionId && result.response) {
+      sessionStore.appendMessage(sessionId, { role: 'assistant', content: result.response });
+    }
 
     console.log(`[chat] jarvis: "${(result.response ?? '').substring(0, 80)}..."`);
     if (result.metadata.memoriesRecalled) {
@@ -178,6 +210,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
 
     res.json({
       response: result.response,
+      sessionId,
       metadata: {
         provider: chain.getCapabilities().providerId,
         model: chain.getCapabilities().modelId,
@@ -185,6 +218,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
         memoriesExtracted: result.metadata.memoriesExtracted ?? 0,
         tasksExtracted: result.metadata.tasksExtracted ?? 0,
         profileUpdated: result.metadata.profileUpdated ?? false,
+        ragSources: result.metadata.ragSources || [],
       },
     });
   } catch (err) {
@@ -234,6 +268,23 @@ app.post('/api/chat/stream', async (req: Request, res: Response) => {
   }
 });
 
+// ─── Session Inspection Endpoints ─────────────────────────────────────────────
+
+app.get('/api/sessions', async (_req: Request, res: Response) => {
+  const sessions = sessionStore.getAllSessions();
+  res.json({ sessions, count: sessions.length });
+});
+
+app.get('/api/sessions/:id/messages', async (req: Request, res: Response) => {
+  const messages = sessionStore.getMessages(req.params.id);
+  res.json({ messages });
+});
+
+app.delete('/api/sessions/:id', async (req: Request, res: Response) => {
+  sessionStore.deleteSession(req.params.id);
+  res.json({ deleted: true });
+});
+
 // ─── Memory & Profile Inspection Endpoints ──────────────────────────────────
 
 app.get('/api/memories', async (_req: Request, res: Response) => {
@@ -261,6 +312,16 @@ app.get('/api/profile', async (_req: Request, res: Response) => {
   res.json({ profile });
 });
 
+app.patch('/api/profile', async (req: Request, res: Response) => {
+  try {
+    await profileStore.updateProfile('default', req.body);
+    const profile = await profileStore.getProfile('default');
+    res.json({ profile });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/profile/history', async (_req: Request, res: Response) => {
   const history = await profileStore.getProfileHistory('default');
   res.json({ history });
@@ -271,9 +332,37 @@ app.get('/api/tasks', async (_req: Request, res: Response) => {
   res.json({ tasks, count: tasks.length });
 });
 
+app.patch('/api/tasks/:id', async (req: Request, res: Response) => {
+  try {
+    const updated = await taskStore.updateTask(req.params.id, req.body);
+    res.json({ task: updated });
+  } catch (err: any) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+app.delete('/api/tasks/:id', async (req: Request, res: Response) => {
+  const deleted = await taskStore.deleteTask(req.params.id);
+  res.json({ deleted });
+});
+
 app.get('/api/reminders', async (_req: Request, res: Response) => {
   const reminders = await reminderStore.getPendingReminders();
   res.json({ reminders, count: reminders.length });
+});
+
+app.patch('/api/reminders/:id', async (req: Request, res: Response) => {
+  try {
+    const updated = await reminderStore.updateReminder(req.params.id, req.body);
+    res.json({ reminder: updated });
+  } catch (err: any) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+app.delete('/api/reminders/:id', async (req: Request, res: Response) => {
+  const deleted = await reminderStore.deleteReminder(req.params.id);
+  res.json({ deleted });
 });
 
 app.get('/api/captures', async (_req: Request, res: Response) => {
@@ -285,14 +374,14 @@ app.get('/api/captures', async (_req: Request, res: Response) => {
 
 app.post('/api/knowledge/sync', async (_req: Request, res: Response) => {
   try {
-     if (!process.env.OBSIDIAN_VAULT_PATH) {
-        res.status(400).json({ error: 'OBSIDIAN_VAULT_PATH not set in .env' });
-        return;
-     }
-     const result = await obsidianCrawler.syncVault();
-     res.json(result);
-  } catch(e: any) {
-     res.status(500).json({ error: e.message });
+    if (!process.env.OBSIDIAN_VAULT_PATH) {
+      res.status(400).json({ error: 'OBSIDIAN_VAULT_PATH not set in .env' });
+      return;
+    }
+    const result = await obsidianCrawler.syncVault();
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -302,8 +391,8 @@ app.get('/api/auth/google', async (req: Request, res: Response) => {
   try {
     const { google } = await import('googleapis');
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
-       res.status(500).json({ error: 'OAuth credentials not set in .env' });
-       return;
+      res.status(500).json({ error: 'OAuth credentials not set in .env' });
+      return;
     }
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -317,7 +406,7 @@ app.get('/api/auth/google', async (req: Request, res: Response) => {
     });
     // Send user to Google Auth screen
     res.redirect(authUrl);
-  } catch(e: any) {
+  } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -327,17 +416,17 @@ app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
     const { google } = await import('googleapis');
     const code = req.query.code as string;
     const error = req.query.error as string;
-    
+
     if (error) {
-       res.status(400).json({ error: `Google OAuth error: ${error}`, details: req.query });
-       return;
+      res.status(400).json({ error: `Google OAuth error: ${error}`, details: req.query });
+      return;
     }
-    
+
     if (!code) {
-       res.status(400).json({ error: 'No code found in request.', queryReceived: req.query });
-       return;
+      res.status(400).json({ error: 'No code found in request.', queryReceived: req.query });
+      return;
     }
-    
+
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
@@ -345,18 +434,18 @@ app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
     );
 
     const { tokens } = await oauth2Client.getToken(code);
-    
+
     if (tokens.refresh_token) {
-       // Save to profile 
-       await profileStore.updateProfile('default', {
-          preferences: { google_refresh_token: tokens.refresh_token }
-       });
-       res.send('<h2>Authentication Successful!</h2><p>JARVIS now has Calendar access. You may close this tab.</p>');
+      // Save to profile 
+      await profileStore.updateProfile('default', {
+        preferences: { google_refresh_token: tokens.refresh_token }
+      });
+      res.send('<h2>Authentication Successful!</h2><p>JARVIS now has Calendar access. You may close this tab.</p>');
     } else {
-       res.send('<h2>Authentication Failed</h2><p>No refresh token granted. Please ensure "prompt: consent" was applied and try again.</p>');
+      res.send('<h2>Authentication Failed</h2><p>No refresh token granted. Please ensure "prompt: consent" was applied and try again.</p>');
     }
   } catch (err: any) {
-     res.status(500).send(`Error: ${err.message}`);
+    res.status(500).send(`Error: ${err.message}`);
   }
 });
 

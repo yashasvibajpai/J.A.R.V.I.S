@@ -22,7 +22,7 @@ export class OllamaAdapter implements LLMProvider {
       model: this.model,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       options: {
-        temperature: options?.temperature ?? 0.7,
+        temperature: 0.0, // Forced fully deterministic to prevent hallucinations
         num_predict: options?.maxTokens ?? 4096,
         ...(options?.stopSequences ? { stop: options.stopSequences } : {}),
       },
@@ -37,7 +37,7 @@ export class OllamaAdapter implements LLMProvider {
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       stream: true,
       options: {
-        temperature: options?.temperature ?? 0.7,
+        temperature: 0.0, // Forced fully deterministic
         num_predict: options?.maxTokens ?? 4096,
         ...(options?.stopSequences ? { stop: options.stopSequences } : {}),
       },

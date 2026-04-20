@@ -26,7 +26,8 @@ export function knowledgeMiddleware(
 
       if (matches.length > 0) {
         let contextBlock = `## Verified Personal Knowledge (Obsidian Vault)\n`;
-        contextBlock += `Use the following notes to answer the user's query. If the notes do not contain the answer, rely on your general knowledge but clarify the notes were not applicable. ALWAYS cite the source File if you use it (e.g. "According to your note on X").\n\n`;
+        contextBlock += `You have been provided with notes directly from the user's Obsidian Vault. You must use ONLY these notes to answer the user's query.\n`;
+        contextBlock += `It is IMPERATIVE that you do not generate or fabricate any information. If the exact answer is NOT present in the provided notes, you MUST output verbatim: "I do not have sufficient information in my memories to answer that." Do not invent facts. ALWAYS cite the source File if you use it (e.g. "According to your note on X").\n\n`;
 
         for (const match of matches) {
           const { fileName, content, tags } = match.metadata || {};

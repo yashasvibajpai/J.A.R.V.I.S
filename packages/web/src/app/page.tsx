@@ -14,6 +14,7 @@ interface ChatMessage {
     memoriesRecalled?: number;
     memoriesExtracted?: number;
     profileUpdated?: boolean;
+    ragSources?: string[];
   };
 }
 
@@ -57,6 +58,8 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<{ id: string; title: string }[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -105,16 +108,10 @@ export default function Home() {
       if (inputRef.current) inputRef.current.style.height = "auto";
 
       try {
-        // Build history for context
-        const history = messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
-
         const res = await fetch(`${API_URL}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, history }),
+          body: JSON.stringify({ message: text, sessionId: sessionId || undefined }),
         });
 
         if (!res.ok) throw new Error(`API error: ${res.status}`);
@@ -130,6 +127,11 @@ export default function Home() {
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
+
+        if (data.sessionId && !sessionId) {
+          setSessionId(data.sessionId);
+          loadSessions(); // refresh the sidebar sessions list
+        }
 
         // Update memory count after extraction
         if (data.metadata?.memoriesExtracted > 0) {
@@ -172,7 +174,88 @@ export default function Home() {
     );
   };
 
-  // ─── Load Profile & Memories ────────────────────────────────────────────
+  const deleteMemory = async (id: string) => {
+    try {
+      await fetch(`${API_URL}/api/memories/${id}`, { method: 'DELETE' });
+      loadMemories(); // Refresh the list
+    } catch {
+      console.error("Failed to delete memory");
+    }
+  };
+
+  const updateTask = async (id: string, updates: Partial<Task>) => {
+    try {
+      await fetch(`${API_URL}/api/tasks/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      loadTasksAndReminders();
+    } catch { console.error("Failed to update task"); }
+  };
+
+  const deleteTask = async (id: string) => {
+    try {
+      await fetch(`${API_URL}/api/tasks/${id}`, { method: 'DELETE' });
+      loadTasksAndReminders();
+    } catch { console.error("Failed to delete task"); }
+  };
+
+  const updateReminder = async (id: string, updates: Partial<Reminder>) => {
+    try {
+      await fetch(`${API_URL}/api/reminders/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      loadTasksAndReminders();
+    } catch { console.error("Failed to update reminder"); }
+  };
+
+  const deleteReminder = async (id: string) => {
+    try {
+      await fetch(`${API_URL}/api/reminders/${id}`, { method: 'DELETE' });
+      loadTasksAndReminders();
+    } catch { console.error("Failed to delete reminder"); }
+  };
+
+  // ─── Load Profile, Memories & Sessions ────────────────────────────────────────────────
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions`);
+      const data = await res.json();
+      setSessions(data.sessions || []);
+    } catch {
+      /* silent */
+    }
+  }, []);
+
+  const loadSessionChat = async (id: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions/${id}/messages`);
+      const data = await res.json();
+      const loadedMessages = data.messages.map((m: any) => ({
+        id: crypto.randomUUID(),
+        role: m.role,
+        content: m.content,
+        timestamp: new Date().toISOString()
+      }));
+      setMessages(loadedMessages);
+      setSessionId(id);
+      setActivePanel("chat");
+      if (window.innerWidth <= 768) setSidebarOpen(false);
+    } catch {
+      /* silent */
+    }
+  };
+
+  const createNewChat = () => {
+    setMessages([]);
+    setSessionId(null);
+    setActivePanel("chat");
+    if (window.innerWidth <= 768) setSidebarOpen(false);
+  };
 
   const loadProfile = useCallback(async () => {
     try {
@@ -183,6 +266,18 @@ export default function Home() {
       /* silent */
     }
   }, []);
+
+  const updateProfile = async (updates: Partial<UserProfile>) => {
+    try {
+      const res = await fetch(`${API_URL}/api/profile`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates)
+      });
+      const data = await res.json();
+      setProfile(data.profile);
+    } catch { console.error("Failed to update profile"); }
+  };
 
   const loadMemories = useCallback(async () => {
     try {
@@ -216,13 +311,14 @@ export default function Home() {
     if (activePanel === "tasks") loadTasksAndReminders();
   }, [activePanel, loadProfile, loadMemories, loadTasksAndReminders]);
 
-  // Initial load for memory count
+  // Initial load for memory count & sessions
   useEffect(() => {
+    loadSessions();
     fetch(`${API_URL}/health`)
       .then((r) => r.json())
       .then((d) => setMemoryCount(d.memory?.count || 0))
       .catch(() => { });
-  }, []);
+  }, [loadSessions]);
 
   // ─── Render ─────────────────────────────────────────────────────────────
 
@@ -248,11 +344,7 @@ export default function Home() {
       {/* Sidebar */}
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="sidebar-header">
-          <div className="sidebar-logo">J</div>
-          <div>
-            <div className="sidebar-title">J.A.R.V.I.S</div>
-            <div className="sidebar-subtitle">Personal AI Assistant</div>
-          </div>
+          <div className="sidebar-title" style={{ fontSize: '1.5rem', letterSpacing: '2px', width: '100%', textAlign: 'center' }}>J.A.R.V.I.S</div>
         </div>
 
         <nav className="sidebar-nav">
@@ -274,23 +366,51 @@ export default function Home() {
           >
             ☑️ Tasks
           </button>
+          <button
+            className={`sidebar-nav-item ${activePanel === "memory" ? "active" : ""}`}
+            onClick={() => { setActivePanel("memory"); setSidebarOpen(false); }}
+          >
+            🧠 Memories
+          </button>
         </nav>
 
         {/* Sidebar panel content */}
         <div className="sidebar-content">
           {activePanel === "profile" && (
-            <ProfilePanel profile={profile} />
+            <ProfilePanel profile={profile} onUpdateProfile={updateProfile} />
           )}
           {activePanel === "memory" && (
-            <MemoryPanel memories={memories} />
+            <MemoryPanel memories={memories} onDelete={deleteMemory} />
           )}
           {activePanel === "tasks" && (
-            <TaskPanel tasks={tasks} reminders={reminders} />
+            <TaskPanel 
+              tasks={tasks} 
+              reminders={reminders} 
+              onUpdateTask={updateTask}
+              onDeleteTask={deleteTask}
+              onUpdateReminder={updateReminder}
+              onDeleteReminder={deleteReminder}
+            />
           )}
           {activePanel === "chat" && (
-            <div className="empty-state">
-              <p>Conversation history appears here.</p>
-              <div className="stat-grid" style={{ marginTop: 16 }}>
+            <div className="chat-history-sidebar">
+              <button className="new-chat-btn" onClick={createNewChat}>
+                + New Chat
+              </button>
+              
+              <div className="session-list">
+                {sessions.map(s => (
+                  <button 
+                    key={s.id} 
+                    className={`session-item ${sessionId === s.id ? 'active' : ''}`}
+                    onClick={() => loadSessionChat(s.id)}
+                  >
+                    💬 {s.title}
+                  </button>
+                ))}
+              </div>
+
+              <div className="stat-grid" style={{ marginTop: 'auto', paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
                 <div className="stat-item">
                   <div className="stat-value">{memoryCount}</div>
                   <div className="stat-label">Memories</div>
@@ -337,6 +457,16 @@ export default function Home() {
                   {msg.content.split("\n").map((line, i) => (
                     <p key={i}>{line || "\u00A0"}</p>
                   ))}
+                  {/* RAG Citations */}
+                  {msg.role === 'assistant' && msg.metadata?.ragSources && msg.metadata.ragSources.length > 0 && (
+                      <div className="rag-citations" style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {msg.metadata.ragSources.map((source, i) => (
+                          <span key={i} style={{ fontSize: '0.75rem', background: 'rgba(14, 165, 233, 0.1)', color: 'var(--accent)', padding: '2px 8px', borderRadius: 4, border: '1px solid var(--accent)' }}>
+                            📄 {source}
+                          </span>
+                        ))}
+                      </div>
+                  )}
                 </div>
                 {msg.role === "assistant" && (
                   <div className="message-actions">
@@ -416,14 +546,72 @@ export default function Home() {
 
 // ─── Sub-Components ─────────────────────────────────────────────────────────
 
-function ProfilePanel({ profile }: { profile: UserProfile | null }) {
+function ProfilePanel({ 
+  profile, 
+  onUpdateProfile 
+}: { 
+  profile: UserProfile | null,
+  onUpdateProfile: (updates: Partial<UserProfile>) => void
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editRole, setEditRole] = useState("");
+  const [editLocation, setEditLocation] = useState("");
+
+  useEffect(() => {
+    if (profile) {
+      setEditName(profile.preferredName || profile.name);
+      setEditRole(profile.context?.role || "");
+      setEditLocation(profile.context?.location || "");
+    }
+  }, [profile, isEditing]);
+
   if (!profile) {
     return <div className="empty-state">Loading profile...</div>;
   }
 
+  const handleSave = () => {
+    onUpdateProfile({
+      preferredName: editName,
+      context: {
+        ...profile.context,
+        role: editRole,
+        location: editLocation
+      }
+    });
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div className="sidebar-section-title">Edit Profile</div>
+        <div className="panel-card">
+          <div className="panel-card-title">Identity</div>
+          <input className="input-field" value={editName} onChange={e => setEditName(e.target.value)} style={{ background: 'transparent', color: 'white', padding: '4px', marginTop: '4px', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', width: '100%' }} />
+        </div>
+        <div className="panel-card">
+          <div className="panel-card-title">Role</div>
+          <input className="input-field" value={editRole} onChange={e => setEditRole(e.target.value)} style={{ background: 'transparent', color: 'white', padding: '4px', marginTop: '4px', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', width: '100%' }} />
+        </div>
+        <div className="panel-card">
+          <div className="panel-card-title">Location</div>
+          <input className="input-field" value={editLocation} onChange={e => setEditLocation(e.target.value)} style={{ background: 'transparent', color: 'white', padding: '4px', marginTop: '4px', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px', width: '100%' }} />
+        </div>
+        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+          <button className="new-chat-btn" onClick={handleSave} style={{ flex: 1, textAlign: 'center', background: 'rgba(14, 165, 233, 0.2)' }}>Save</button>
+          <button className="new-chat-btn" onClick={() => setIsEditing(false)} style={{ flex: 1, textAlign: 'center' }}>Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
-      <div className="sidebar-section-title">User Profile (v{profile.version})</div>
+      <div className="sidebar-section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        User Profile (v{profile.version})
+        <button onClick={() => setIsEditing(true)} style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.8rem' }}>Edit</button>
+      </div>
 
       <div className="panel-card">
         <div className="panel-card-title">👤 Identity</div>
@@ -473,7 +661,7 @@ function ProfilePanel({ profile }: { profile: UserProfile | null }) {
   );
 }
 
-function MemoryPanel({ memories }: { memories: Memory[] }) {
+function MemoryPanel({ memories, onDelete }: { memories: Memory[], onDelete: (id: string) => void }) {
   if (memories.length === 0) {
     return (
       <div className="empty-state">
@@ -488,11 +676,18 @@ function MemoryPanel({ memories }: { memories: Memory[] }) {
         Memories ({memories.length})
       </div>
       {memories.map((m) => (
-        <div key={m.id} className="memory-item">
+        <div key={m.id} className="memory-item" style={{ position: 'relative' }}>
           <div className="memory-category">{m.category}</div>
           <div className="memory-content">{m.content}</div>
-          <div className="memory-date">
+          <div className="memory-date" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             {new Date(m.createdAt).toLocaleDateString()}
+            <button 
+                onClick={() => onDelete(m.id)} 
+                title="Delete memory"
+                style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem' }}
+            >
+              🗑️
+            </button>
           </div>
         </div>
       ))}
@@ -500,7 +695,21 @@ function MemoryPanel({ memories }: { memories: Memory[] }) {
   );
 }
 
-function TaskPanel({ tasks, reminders }: { tasks: Task[]; reminders: Reminder[] }) {
+function TaskPanel({ 
+  tasks, 
+  reminders, 
+  onUpdateTask, 
+  onDeleteTask, 
+  onUpdateReminder, 
+  onDeleteReminder 
+}: { 
+  tasks: Task[], 
+  reminders: Reminder[], 
+  onUpdateTask: (id: string, updates: Partial<Task>) => void,
+  onDeleteTask: (id: string) => void,
+  onUpdateReminder: (id: string, updates: Partial<Reminder>) => void,
+  onDeleteReminder: (id: string) => void
+}) {
   const pendingTasks = tasks.filter(t => t.status === 'pending');
   
   return (
@@ -512,10 +721,26 @@ function TaskPanel({ tasks, reminders }: { tasks: Task[]; reminders: Reminder[] 
          <div className="empty-state">No open tasks. You&apos;re all caught up!</div>
       ) : (
          pendingTasks.map((t) => (
-           <div key={t.id} className="memory-item">
-             <div className="memory-category" style={{color: 'var(--accent)'}}>{t.priority} priority</div>
-             <div className="memory-content" style={{fontSize: '15px'}}>{t.description}</div>
-             {t.dueDate && <div className="memory-date">Due: {t.dueDate}</div>}
+           <div key={t.id} className="memory-item" style={{ position: 'relative' }}>
+             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+               <input 
+                 type="checkbox" 
+                 onChange={(e) => onUpdateTask(t.id, { status: e.target.checked ? 'completed' : 'pending' })} 
+                 style={{ marginTop: '4px', cursor: 'pointer' }}
+               />
+               <div style={{ flex: 1 }}>
+                 <div className="memory-category" style={{color: 'var(--accent)'}}>{t.priority} priority</div>
+                 <div className="memory-content" style={{fontSize: '15px'}}>{t.description}</div>
+                 {t.dueDate && <div className="memory-date">Due: {t.dueDate}</div>}
+               </div>
+               <button 
+                 onClick={() => onDeleteTask(t.id)} 
+                 title="Delete task"
+                 style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem' }}
+               >
+                 🗑️
+               </button>
+             </div>
            </div>
          ))
       )}
@@ -528,10 +753,26 @@ function TaskPanel({ tasks, reminders }: { tasks: Task[]; reminders: Reminder[] 
       ) : (
          reminders.map((r) => (
            <div key={r.id} className="memory-item">
-             <div className="memory-content">⏰ {r.description}</div>
-             {(r.triggerTime || r.triggerContext) && (
-                <div className="memory-date">Trigger: {r.triggerTime || r.triggerContext}</div>
-             )}
+             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                <input 
+                  type="checkbox" 
+                  onChange={(e) => onUpdateReminder(r.id, { completed: e.target.checked })} 
+                  style={{ marginTop: '4px', cursor: 'pointer' }}
+                />
+                <div style={{ flex: 1 }}>
+                  <div className="memory-content">⏰ {r.description}</div>
+                  {(r.triggerTime || r.triggerContext) && (
+                      <div className="memory-date">Trigger: {r.triggerTime || r.triggerContext}</div>
+                  )}
+                </div>
+                <button 
+                  onClick={() => onDeleteReminder(r.id)} 
+                  title="Delete reminder"
+                  style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.8rem' }}
+                >
+                  🗑️
+                </button>
+             </div>
            </div>
          ))
       )}
