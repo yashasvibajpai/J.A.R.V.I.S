@@ -4,6 +4,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync } from 'fs';
 import type { Request, Response } from 'express';
+import multer from 'multer';
 import type { Message } from '@jarvis/shared';
 
 import { AnthropicAdapter } from './adapters/AnthropicAdapter.js';
@@ -64,7 +65,7 @@ function buildProviderChain(): FailoverChain {
   providers.push(
     new OllamaAdapter(
       process.env.OLLAMA_HOST || 'http://localhost:11434',
-      process.env.OLLAMA_MODEL || 'gemma3:4b'
+      process.env.OLLAMA_MODEL || 'gemma-4-E2B'
     )
   );
   console.log('[init] ✓ Ollama adapter loaded (local fallback)');
@@ -382,6 +383,84 @@ app.post('/api/knowledge/sync', async (_req: Request, res: Response) => {
     res.json(result);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Voicebox Audio Endpoints ────────────────────────────────────────────────
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post('/api/voice/transcribe', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!process.env.VOICEBOX_URL) throw new Error("VOICEBOX_URL is not configured.");
+    if (!req.file) throw new Error("No audio file blob provided.");
+
+    const formData = new FormData();
+    formData.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'audio.webm');
+
+    const vbRes = await fetch(`${process.env.VOICEBOX_URL}/transcribe`, {
+      method: 'POST',
+      body: formData,
+      headers: {
+        ...(process.env.VOICEBOX_HF_TOKEN ? { Authorization: `Bearer ${process.env.VOICEBOX_HF_TOKEN}` } : {})
+      }
+    });
+    const data = await vbRes.json();
+    if (!vbRes.ok) throw new Error(data.detail?.[0]?.msg || JSON.stringify(data));
+    
+    res.json({ text: data.text });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/voice/synthesize', async (req: Request, res: Response) => {
+  try {
+    if (!process.env.VOICEBOX_URL || !process.env.VOICEBOX_PROFILE_ID) {
+      throw new Error("Voicebox parameters are not fully configured.");
+    }
+    const { text } = req.body;
+    if (!text) throw new Error("Missing text payload.");
+
+    // 1. Generate task
+    const genRes = await fetch(`${process.env.VOICEBOX_URL}/generate`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        ...(process.env.VOICEBOX_HF_TOKEN ? { Authorization: `Bearer ${process.env.VOICEBOX_HF_TOKEN}` } : {})
+      },
+      body: JSON.stringify({ profile_id: process.env.VOICEBOX_PROFILE_ID, text }),
+    });
+    const genData = await genRes.json();
+    if (!genRes.ok) throw new Error(genData.detail?.[0]?.msg || JSON.stringify(genData));
+
+    // 2. Fetch resulting Audio Buffer (Voicebox generates async, returning 500 until complete)
+    const generationId = genData.id;
+    let audioRes;
+    for (let attempts = 0; attempts < 60; attempts++) {
+      audioRes = await fetch(`${process.env.VOICEBOX_URL}/audio/${generationId}`, {
+        headers: {
+          ...(process.env.VOICEBOX_HF_TOKEN ? { Authorization: `Bearer ${process.env.VOICEBOX_HF_TOKEN}` } : {})
+        }
+      });
+      if (audioRes.ok) break;
+      await new Promise(r => setTimeout(r, 2000)); // Wait 2s between polls
+    }
+
+    if (!audioRes || !audioRes.ok) {
+      throw new Error("Failed to fetch audio buffer from Voicebox after timeout.");
+    }
+
+    const arrayBuffer = await audioRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    res.set({
+      'Content-Type': 'audio/wav',
+      'Content-Length': buffer.length,
+    });
+    res.send(buffer);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 

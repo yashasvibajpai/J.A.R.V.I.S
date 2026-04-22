@@ -70,6 +70,11 @@ export default function Home() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [memoryCount, setMemoryCount] = useState(0);
 
+  // Voice Mode State
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<BlobPart[]>([]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -85,12 +90,103 @@ export default function Home() {
     e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
   };
 
+  // ─── Voice Interaction ──────────────────────────────────────────────────
+
+  const toggleRecording = async () => {
+    if (isRecording && mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+           audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+         const formData = new FormData();
+         formData.append('file', audioBlob, 'recording.webm');
+         
+         setIsLoading(true);
+         try {
+           const res = await fetch(`${API_URL}/api/voice/transcribe`, {
+             method: 'POST',
+             body: formData
+           });
+           const data = await res.json();
+           if (data.text !== undefined) {
+             if (data.text.trim()) {
+               sendMessage(data.text);
+             } else {
+               setIsLoading(false); // Graceful exit on silent/empty transcription
+             }
+           } else {
+             console.error("Transcription API Error:", data.error || data);
+             setIsLoading(false);
+           }
+         } catch {
+           console.error("Failed to transcribe audio.");
+           setIsLoading(false);
+         } finally {
+           stream.getTracks().forEach(track => track.stop());
+         }
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err: any) {
+       console.error("Microphone access denied or unavailable.", err);
+       alert("Microphone access blocked. Ensure you are on localhost or HTTPS, and have granted microphone permissions to your browser.");
+    }
+  };
+
+  const playTTS = async (text: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/voice/synthesize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (res.ok) {
+        const audioBlob = await res.blob();
+        const url = URL.createObjectURL(audioBlob);
+        const audio = new Audio(url);
+        audio.play().catch(e => console.error("Playback failed: ", e));
+      }
+    } catch {
+      console.error("Failed to synthesize TTS.");
+    }
+  };
+
+  // ─── Load Profile, Memories & Sessions ────────────────────────────────────────────────
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions`);
+      const data = await res.json();
+      setSessions(data.sessions || []);
+    } catch {
+      /* silent */
+    }
+  }, []);
+
   // ─── Send Message ───────────────────────────────────────────────────────
 
   const sendMessage = useCallback(
-    async (e?: FormEvent) => {
-      e?.preventDefault();
-      const text = input.trim();
+    async (e?: FormEvent | string) => {
+      if (typeof e !== 'string') {
+        e?.preventDefault();
+      }
+      const text = typeof e === 'string' ? e.trim() : input.trim();
       if (!text || isLoading) return;
 
       const userMsg: ChatMessage = {
@@ -137,6 +233,11 @@ export default function Home() {
         if (data.metadata?.memoriesExtracted > 0) {
           setMemoryCount((c) => c + data.metadata.memoriesExtracted);
         }
+
+        // Live Voice Mode Auto-Playback
+        if (data.response) { 
+          playTTS(data.response); 
+        }
       } catch (err) {
         const errorMsg: ChatMessage = {
           id: crypto.randomUUID(),
@@ -150,7 +251,7 @@ export default function Home() {
         inputRef.current?.focus();
       }
     },
-    [input, isLoading, messages]
+    [input, isLoading, sessionId, loadSessions]
   );
 
   // ─── Keyboard Handling ──────────────────────────────────────────────────
@@ -221,15 +322,6 @@ export default function Home() {
 
   // ─── Load Profile, Memories & Sessions ────────────────────────────────────────────────
 
-  const loadSessions = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_URL}/api/sessions`);
-      const data = await res.json();
-      setSessions(data.sessions || []);
-    } catch {
-      /* silent */
-    }
-  }, []);
 
   const loadSessionChat = async (id: string) => {
     try {
@@ -471,6 +563,13 @@ export default function Home() {
                 {msg.role === "assistant" && (
                   <div className="message-actions">
                     <button
+                      className="message-action-btn"
+                      onClick={() => playTTS(msg.content)}
+                      title="Play Audio"
+                    >
+                      🔊
+                    </button>
+                    <button
                       className={`message-action-btn ${msg.feedback === "up" ? "active" : ""}`}
                       onClick={() => handleFeedback(msg.id, "up")}
                       title="Good response"
@@ -526,7 +625,17 @@ export default function Home() {
               disabled={isLoading}
               autoFocus
             />
-            <button
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                className={`send-btn ${isRecording ? 'recording' : ''}`}
+                onClick={toggleRecording}
+                title={isRecording ? "Stop recording" : "Record voice"}
+                style={{ background: isRecording ? '#ef4444' : undefined }}
+              >
+                🎙️
+              </button>
+              <button
               type="submit"
               className="send-btn"
               disabled={!input.trim() || isLoading}
@@ -536,7 +645,8 @@ export default function Home() {
                 <line x1="22" y1="2" x2="11" y2="13" />
                 <polygon points="22 2 15 22 11 13 2 9 22 2" />
               </svg>
-            </button>
+              </button>
+            </div>
           </form>
         </div>
       </main>

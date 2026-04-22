@@ -1,0 +1,17 @@
+HTTP/2 200 
+date: Tue, 21 Apr 2026 18:40:37 GMT
+content-type: audio/wav
+content-length: 92204
+server: uvicorn
+accept-ranges: bytes
+content-disposition: attachment; filename="generation_5ee46bb5-a8f8-4c35-a32c-2896f49459ac.wav"
+last-modified: Tue, 21 Apr 2026 18:40:31 GMT
+etag: "5aca8881612b77360aeedf8b89ff1ad9"
+x-proxied-host: http://10.112.28.220
+x-proxied-replica: lwig2yt1-lzlkg
+x-proxied-path: /audio/5ee46bb5-a8f8-4c35-a32c-2896f49459ac
+link: <https://huggingface.co/spaces/bajpaiji/J.A.R.V.I.S>;rel="canonical"
+x-request-id: _V9rgS
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-allow-credentials: true
+
