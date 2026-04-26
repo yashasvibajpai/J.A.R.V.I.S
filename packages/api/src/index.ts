@@ -7,22 +7,25 @@ import type { Request, Response } from 'express';
 import multer from 'multer';
 import type { Message } from '@jarvis/shared';
 
-import { AnthropicAdapter } from './adapters/AnthropicAdapter.js';
-import { OpenAIAdapter } from './adapters/OpenAIAdapter.js';
-import { OllamaAdapter } from './adapters/OllamaAdapter.js';
-import { FailoverChain } from './engine/failover.js';
+import { SmartRouter } from './engine/SmartRouter.js';
+import { buildProviderRegistry } from './engine/provider-registry.js';
+import { OpenClawBridge } from './services/OpenClawBridge.js';
 import { loadCartridge, buildSystemPrompt } from './engine/personality.js';
 import {
   Pipeline,
   systemPromptMiddleware,
   llmCallMiddleware,
 } from './engine/pipeline.js';
+import { observabilityMiddleware } from './engine/observability.js';
 import { memoryRecallMiddleware, memoryExtractionMiddleware } from './engine/memory-middleware.js';
 import { profileInjectionMiddleware, profileExtractionMiddleware } from './engine/profile-middleware.js';
 import { taskRecallMiddleware, taskExtractionMiddleware } from './engine/task-middleware.js';
 import { calendarMiddleware } from './engine/calendar-middleware.js';
 import { knowledgeMiddleware } from './engine/knowledge-middleware.js';
 import { tokenTruncationMiddleware } from './engine/token-middleware.js';
+import { toolCatalogueMiddleware } from './engine/tool-catalogue.js';
+import { openclawActionMiddleware } from './engine/openclaw-middleware.js';
+import { profileExtractionMiddleware } from './engine/profile-middleware.js';
 import { SQLiteMemoryStore } from './stores/SQLiteMemoryStore.js';
 import { SQLiteProfileStore } from './stores/SQLiteProfileStore.js';
 import { SQLiteTaskStore } from './stores/SQLiteTaskStore.js';
@@ -46,42 +49,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, '../../data');
 mkdirSync(DATA_DIR, { recursive: true });
 
-// ─── Build the LLM Provider Chain ───────────────────────────────────────────
+// ─── Build the Smart LLM Router ─────────────────────────────────────────────
 
-function buildProviderChain(): FailoverChain {
-  const providers = [];
-
-  if (process.env.ANTHROPIC_API_KEY) {
-    providers.push(new AnthropicAdapter(process.env.ANTHROPIC_API_KEY));
-    console.log('[init] ✓ Anthropic Claude adapter loaded');
-  }
-
-  if (process.env.OPENAI_API_KEY) {
-    providers.push(new OpenAIAdapter(process.env.OPENAI_API_KEY));
-    console.log('[init] ✓ OpenAI GPT-4o adapter loaded');
-  }
-
-  // Ollama is always available as a fallback (no API key needed)
-  providers.push(
-    new OllamaAdapter(
-      process.env.OLLAMA_HOST || 'http://localhost:11434',
-      process.env.OLLAMA_MODEL || 'gemma-4-E2B'
-    )
-  );
-  console.log('[init] ✓ Ollama adapter loaded (local fallback)');
-
-  if (providers.length === 0) {
-    throw new Error(
-      'No LLM providers configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in your .env'
-    );
-  }
-
-  return new FailoverChain(providers);
+function buildSmartRouter(): SmartRouter {
+  console.log('[init] Building SmartRouter — auto-discovering providers...');
+  const registry = buildProviderRegistry();
+  return new SmartRouter(registry);
 }
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
-const chain = buildProviderChain();
+const chain = buildSmartRouter();
 
 // Load personality
 const cartridgePath = process.env.CARTRIDGE_PATH || undefined;
@@ -112,13 +90,20 @@ const sessionStore = new SQLiteSessionStore(resolve(DATA_DIR, 'sessions.db'));
 console.log('[init] ✓ Knowledge store initialised (LanceDB & SQLite Sync)');
 
 const vaultPath = process.env.OBSIDIAN_VAULT_PATH || '';
+// SmartRouter implements LLMProvider, so it works seamlessly with existing code
 const obsidianCrawler = new ObsidianCrawler(vaultPath, chain, vectorStore, syncStore);
 
+const openclaw = new OpenClawBridge();
+if (process.env.OPENCLAW_ENABLED === 'true') {
+  console.log('[init] ✓ OpenClaw Gateway bridge active');
+}
+
 // Build the message pipeline
-// Order: observe → system prompt → calendar → profile → memory → knowledgeRAG → taskRecall → LLM → ...
+// Order: observe → system prompt → toolCatalogue → calendar → profile → memory → knowledgeRAG → taskRecall → llmCall → openclawAction → ...
 const pipeline = new Pipeline()
   .use(observabilityMiddleware())
   .use(systemPromptMiddleware(systemPrompt))
+  .use(toolCatalogueMiddleware(openclaw))
   .use(calendarMiddleware(profileStore))
   .use(profileInjectionMiddleware(profileStore))
   .use(memoryRecallMiddleware(memoryStore))
@@ -126,6 +111,7 @@ const pipeline = new Pipeline()
   .use(taskRecallMiddleware(taskStore, reminderStore))
   .use(tokenTruncationMiddleware(6000))
   .use(llmCallMiddleware(chain))
+  .use(openclawActionMiddleware(openclaw, chain))
   .use(memoryExtractionMiddleware(memoryStore, chain))
   .use(taskExtractionMiddleware(taskStore, reminderStore, captureStore, chain))
   .use(profileExtractionMiddleware(profileStore, chain));
@@ -151,10 +137,43 @@ app.get('/health', async (_req: Request, res: Response) => {
   });
 });
 
-// Provider health check
+// Provider health check (legacy)
 app.get('/health/providers', async (_req: Request, res: Response) => {
   const health = await chain.healthCheck();
   res.json({ providers: health });
+});
+
+// SmartRouter live dashboard — shows all providers, their status, rate limits, and usage
+app.get('/api/providers', async (_req: Request, res: Response) => {
+  const dashboard = chain.healthDashboard();
+  res.json({ providers: dashboard });
+});
+
+// Confirm and execute a pending OpenClaw action
+app.post('/api/actions/confirm', async (req: Request, res: Response) => {
+  try {
+    const { actionId, tool, params, sessionId } = req.body;
+    
+    if (!actionId || !tool) {
+      return res.status(400).json({ error: 'Missing action details' });
+    }
+
+    console.log(`[OpenClaw] User confirmed action execution: ${tool}`);
+    const toolResult = await openclaw.invokeTool(tool, params || {});
+    
+    // In a full implementation, we'd append this result to the session history
+    // and make a follow-up LLM call to synthesize the result.
+    // For now, we return the raw tool result so the UI can display it.
+    
+    res.json({
+      status: 'executed',
+      tool,
+      result: toolResult
+    });
+  } catch (error: any) {
+    console.error(`[OpenClaw] Action execution failed:`, error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Chat endpoint
@@ -209,17 +228,22 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       console.log(`[chat] profile updated`);
     }
 
+    // Get the actual provider that handled this request
+    const lastUsed = chain.getLastUsedProvider();
+
     res.json({
       response: result.response,
       sessionId,
       metadata: {
-        provider: chain.getCapabilities().providerId,
-        model: chain.getCapabilities().modelId,
+        provider: lastUsed?.providerId ?? chain.getCapabilities().providerId,
+        model: lastUsed?.modelId ?? chain.getCapabilities().modelId,
         memoriesRecalled: result.metadata.memoriesRecalled ?? 0,
         memoriesExtracted: result.metadata.memoriesExtracted ?? 0,
         tasksExtracted: result.metadata.tasksExtracted ?? 0,
         profileUpdated: result.metadata.profileUpdated ?? false,
         ragSources: result.metadata.ragSources || [],
+        pendingAction: result.pendingAction,
+        toolExecuted: result.metadata.toolExecuted,
       },
     });
   } catch (err) {
@@ -392,13 +416,14 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.post('/api/voice/transcribe', upload.single('file'), async (req: Request, res: Response) => {
   try {
-    if (!process.env.VOICEBOX_URL) throw new Error("VOICEBOX_URL is not configured.");
+    const voiceUrl = process.env.VOICEBOX_USE_LOCAL === "true" ? "http://127.0.0.1:17493" : process.env.VOICEBOX_URL;
+    if (!voiceUrl) throw new Error("Voicebox URL is not configured.");
     if (!req.file) throw new Error("No audio file blob provided.");
 
     const formData = new FormData();
     formData.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'audio.webm');
 
-    const vbRes = await fetch(`${process.env.VOICEBOX_URL}/transcribe`, {
+    const vbRes = await fetch(`${voiceUrl}/transcribe`, {
       method: 'POST',
       body: formData,
       headers: {
@@ -416,20 +441,21 @@ app.post('/api/voice/transcribe', upload.single('file'), async (req: Request, re
 
 app.post('/api/voice/synthesize', async (req: Request, res: Response) => {
   try {
-    if (!process.env.VOICEBOX_URL || !process.env.VOICEBOX_PROFILE_ID) {
+    const voiceUrl = process.env.VOICEBOX_USE_LOCAL === "true" ? "http://127.0.0.1:17493" : process.env.VOICEBOX_URL;
+    if (!voiceUrl || !process.env.VOICEBOX_PROFILE_ID) {
       throw new Error("Voicebox parameters are not fully configured.");
     }
     const { text } = req.body;
     if (!text) throw new Error("Missing text payload.");
 
     // 1. Generate task
-    const genRes = await fetch(`${process.env.VOICEBOX_URL}/generate`, {
+    const genRes = await fetch(`${voiceUrl}/generate`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
         ...(process.env.VOICEBOX_HF_TOKEN ? { Authorization: `Bearer ${process.env.VOICEBOX_HF_TOKEN}` } : {})
       },
-      body: JSON.stringify({ profile_id: process.env.VOICEBOX_PROFILE_ID, text }),
+      body: JSON.stringify({ profile_id: process.env.VOICEBOX_PROFILE_ID, text, engine: "luxtts" }),
     });
     const genData = await genRes.json();
     if (!genRes.ok) throw new Error(genData.detail?.[0]?.msg || JSON.stringify(genData));
@@ -438,7 +464,7 @@ app.post('/api/voice/synthesize', async (req: Request, res: Response) => {
     const generationId = genData.id;
     let audioRes;
     for (let attempts = 0; attempts < 60; attempts++) {
-      audioRes = await fetch(`${process.env.VOICEBOX_URL}/audio/${generationId}`, {
+      audioRes = await fetch(`${voiceUrl}/audio/${generationId}`, {
         headers: {
           ...(process.env.VOICEBOX_HF_TOKEN ? { Authorization: `Bearer ${process.env.VOICEBOX_HF_TOKEN}` } : {})
         }
@@ -537,6 +563,7 @@ app.listen(PORT, () => {
   console.log(`─────────────────────────────────────────────────`);
   console.log(`  POST /api/chat           — conversation`);
   console.log(`  POST /api/chat/stream    — SSE streaming`);
+  console.log(`  GET  /api/providers      — SmartRouter dashboard`);
   console.log(`  GET  /api/memories       — all memories`);
   console.log(`  GET  /api/memories/search — search memories`);
   console.log(`  GET  /api/profile        — user profile`);

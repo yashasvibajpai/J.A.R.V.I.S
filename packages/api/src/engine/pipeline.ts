@@ -18,6 +18,17 @@ export interface PipelineContext {
 
   /** Metadata collected during the pipeline — future home of memory recall, profile data, etc. */
   metadata: Record<string, any>;
+
+  /** 
+   * An action requested by the LLM that needs to be executed via OpenClaw.
+   * If safetyTier is 'destructive', it blocks the pipeline and waits for user confirmation.
+   */
+  pendingAction?: {
+    id: string;
+    tool: string;
+    params: Record<string, any>;
+    safetyTier: 'safe' | 'destructive';
+  };
 }
 
 /**

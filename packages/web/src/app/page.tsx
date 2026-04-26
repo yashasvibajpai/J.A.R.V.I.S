@@ -16,6 +16,8 @@ interface ChatMessage {
     profileUpdated?: boolean;
     ragSources?: string[];
   };
+  audioUrl?: string;
+  isAudioLoading?: boolean;
 }
 
 interface Memory {
@@ -149,7 +151,14 @@ export default function Home() {
     }
   };
 
-  const playTTS = async (text: string) => {
+  const playTTS = async (text: string, msgId: string) => {
+    const msg = messages.find(m => m.id === msgId);
+    if (msg?.audioUrl) {
+      new Audio(msg.audioUrl).play();
+      return;
+    }
+
+    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, isAudioLoading: true } : m));
     try {
       const res = await fetch(`${API_URL}/api/voice/synthesize`, {
         method: 'POST',
@@ -159,11 +168,15 @@ export default function Home() {
       if (res.ok) {
         const audioBlob = await res.blob();
         const url = URL.createObjectURL(audioBlob);
+        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, audioUrl: url, isAudioLoading: false } : m));
         const audio = new Audio(url);
         audio.play().catch(e => console.error("Playback failed: ", e));
+      } else {
+        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, isAudioLoading: false } : m));
       }
     } catch {
-      console.error("Failed to synthesize TTS.");
+       console.error("Failed to synthesize TTS.");
+       setMessages(prev => prev.map(m => m.id === msgId ? { ...m, isAudioLoading: false } : m));
     }
   };
 
@@ -236,7 +249,7 @@ export default function Home() {
 
         // Live Voice Mode Auto-Playback
         if (data.response) { 
-          playTTS(data.response); 
+          playTTS(data.response, assistantMsgId); 
         }
       } catch (err) {
         const errorMsg: ChatMessage = {
@@ -322,6 +335,19 @@ export default function Home() {
 
   // ─── Load Profile, Memories & Sessions ────────────────────────────────────────────────
 
+
+  const deleteSession = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await fetch(`${API_URL}/api/sessions/${id}`, { method: 'DELETE' });
+      setSessions(prev => prev.filter(s => s.id !== id));
+      if (sessionId === id) {
+        createNewChat();
+      }
+    } catch {
+      /* silent */
+    }
+  };
 
   const loadSessionChat = async (id: string) => {
     try {
@@ -492,13 +518,16 @@ export default function Home() {
               
               <div className="session-list">
                 {sessions.map(s => (
-                  <button 
-                    key={s.id} 
-                    className={`session-item ${sessionId === s.id ? 'active' : ''}`}
-                    onClick={() => loadSessionChat(s.id)}
-                  >
-                    💬 {s.title}
-                  </button>
+                  <div key={s.id} className={`session-item-container ${sessionId === s.id ? 'active' : ''}`} style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
+                    <button 
+                      className={`session-item ${sessionId === s.id ? 'active' : ''}`}
+                      onClick={() => loadSessionChat(s.id)}
+                      style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: '8px 12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                    >
+                      💬 {s.title}
+                    </button>
+                    <button onClick={(e) => deleteSession(s.id, e)} style={{ background: 'none', border: 'none', cursor: 'pointer', opacity: 0.6, fontSize: '1rem', padding: '0 8px' }} title="Delete Chat">🗑️</button>
+                  </div>
                 ))}
               </div>
 
@@ -564,10 +593,12 @@ export default function Home() {
                   <div className="message-actions">
                     <button
                       className="message-action-btn"
-                      onClick={() => playTTS(msg.content)}
+                      onClick={() => playTTS(msg.content, msg.id)}
                       title="Play Audio"
+                      disabled={msg.isAudioLoading}
+                      style={{ opacity: msg.isAudioLoading ? 0.5 : 1 }}
                     >
-                      🔊
+                      {msg.isAudioLoading ? "⏳" : msg.audioUrl ? "▶️" : "🔊"}
                     </button>
                     <button
                       className={`message-action-btn ${msg.feedback === "up" ? "active" : ""}`}
