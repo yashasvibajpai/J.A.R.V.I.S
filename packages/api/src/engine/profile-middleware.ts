@@ -1,5 +1,6 @@
 import type { ProfileStore, LLMProvider } from '@jarvis/shared';
 import type { Middleware } from './pipeline.js';
+import { parseProfileOutput } from './llm-output.js';
 
 const DEFAULT_USER_ID = 'default';
 
@@ -68,6 +69,11 @@ export function profileInjectionMiddleware(profileStore: ProfileStore): Middlewa
  * Periodically uses the LLM to extract profile-level facts
  * (preferences, context, etc.) from the conversation.
  * Runs less frequently than memory extraction — every 5 messages.
+ *
+ * ⚡ ASYNC WRITE PATH: extraction is fire-and-forget via setImmediate.
+ * The HTTP response is not held open. Output is validated with
+ * parseProfileOutput() — malformed JSON from small models returns null
+ * and is silently skipped (no store corruption).
  */
 export function profileExtractionMiddleware(
   profileStore: ProfileStore,
@@ -83,35 +89,44 @@ export function profileExtractionMiddleware(
     if (messageCount % interval !== 0) return; // Only run every N messages
     if (!ctx.response || ctx.userMessage.trim().length < 15) return;
 
-    try {
-      const currentProfile = await profileStore.getProfile(DEFAULT_USER_ID);
-      const currentContext = currentProfile
-        ? JSON.stringify(currentProfile.context, null, 2)
-        : '{}';
+    // Capture values before the async boundary
+    const userMessage = ctx.userMessage;
+    const response = ctx.response;
 
-      const extraction = await llm.chat(
-        [
-          { role: 'system', content: PROFILE_EXTRACTION_PROMPT },
-          {
-            role: 'user',
-            content: `Current profile context:\n${currentContext}\n\nUser said: "${ctx.userMessage}"\nAssistant replied: "${ctx.response}"`,
-          },
-        ],
-        { temperature: 0.1, maxTokens: 512 }
-      );
+    // ── Fire-and-forget ───────────────────────────────────────────────────────
+    setImmediate(async () => {
+      try {
+        const currentProfile = await profileStore.getProfile(DEFAULT_USER_ID);
+        const currentContext = currentProfile
+          ? JSON.stringify(currentProfile.context, null, 2)
+          : '{}';
 
-      const updates = parseProfileUpdates(extraction);
-
-      if (updates && Object.keys(updates).length > 0) {
-        await profileStore.updateProfile(DEFAULT_USER_ID, updates);
-        console.log(
-          `[profile] updated: ${Object.keys(updates).join(', ')}`
+        const extraction = await llm.chat(
+          [
+            { role: 'system', content: PROFILE_EXTRACTION_PROMPT },
+            {
+              role: 'user',
+              content: `Current profile context:\n${currentContext}\n\nUser said: "${userMessage}"\nAssistant replied: "${response}"`,
+            },
+          ],
+          { temperature: 0.1, maxTokens: 512 }
         );
-        ctx.metadata.profileUpdated = true;
+
+        // ── Zod-equivalent validation — no silent corruption ─────────────────
+        const updates = parseProfileOutput(extraction);
+
+        if (updates) {
+          await profileStore.updateProfile(DEFAULT_USER_ID, updates);
+          console.log(
+            `[profile:bg] updated: ${Object.keys(updates).join(', ')}`
+          );
+        }
+      } catch (err) {
+        console.warn(`[profile:bg] extraction failed (non-fatal): ${err}`);
       }
-    } catch (err) {
-      console.warn(`[profile] extraction failed: ${err}`);
-    }
+    });
+
+    ctx.metadata.profileExtractionScheduled = true;
   };
 }
 
@@ -138,33 +153,3 @@ Respond in valid JSON with ONLY the fields that should be updated:
 }
 
 If nothing new to extract, respond with exactly: {}`;
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function parseProfileUpdates(raw: string): Partial<{
-  preferredName: string;
-  context: Record<string, any>;
-  preferences: Record<string, any>;
-}> | null {
-  try {
-    // Extract JSON from the response (it might be wrapped in markdown code blocks)
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-
-    const parsed = JSON.parse(jsonMatch[0]);
-
-    // Only return non-empty updates
-    const result: Record<string, any> = {};
-    if (parsed.preferredName) result.preferredName = parsed.preferredName;
-    if (parsed.context && Object.keys(parsed.context).length > 0) {
-      result.context = parsed.context;
-    }
-    if (parsed.preferences && Object.keys(parsed.preferences).length > 0) {
-      result.preferences = parsed.preferences;
-    }
-
-    return Object.keys(result).length > 0 ? result : null;
-  } catch {
-    return null;
-  }
-}

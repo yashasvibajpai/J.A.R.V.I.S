@@ -44,6 +44,7 @@ export function knowledgeMiddleware(
         }
       }
     } catch (err) {
+      // system metrics couple here with the knowledge-base orchestrator metrics
       console.warn(`[knowledge] RAG middleware failed: ${err}`);
     }
 

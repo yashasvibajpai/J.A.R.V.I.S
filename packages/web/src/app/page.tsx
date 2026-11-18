@@ -11,10 +11,19 @@ interface ChatMessage {
   timestamp: string;
   feedback?: "up" | "down";
   metadata?: {
+    provider?: string;
+    model?: string;
     memoriesRecalled?: number;
     memoriesExtracted?: number;
     profileUpdated?: boolean;
     ragSources?: string[];
+    pendingAction?: {
+      id: string;
+      tool: string;
+      params: Record<string, any>;
+      safetyTier: 'safe' | 'destructive';
+    };
+    toolExecuted?: string;
   };
   audioUrl?: string;
   isAudioLoading?: boolean;
@@ -230,7 +239,7 @@ export default function Home() {
         const assistantMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: data.response || "No response received.",
+          content: data.response || (data.metadata?.pendingAction ? "I need your permission to proceed with an action." : "No response received."),
           timestamp: new Date().toISOString(),
           metadata: data.metadata,
         };
@@ -249,7 +258,7 @@ export default function Home() {
 
         // Live Voice Mode Auto-Playback
         if (data.response) { 
-          playTTS(data.response, assistantMsgId); 
+          playTTS(data.response, assistantMsg.id); 
         }
       } catch (err) {
         const errorMsg: ChatMessage = {
@@ -588,9 +597,56 @@ export default function Home() {
                         ))}
                       </div>
                   )}
+
+                  {/* Action Confirmation Modal */}
+                  {msg.metadata?.pendingAction && msg.metadata.pendingAction.safetyTier === 'destructive' && (
+                    <div className="action-confirmation-modal">
+                      <div className="action-header">
+                        <span className="action-icon">⚠️</span>
+                        <strong>Action Required</strong>
+                      </div>
+                      <p>JARVIS is requesting to execute a command on your system:</p>
+                      <pre className="action-code-block">
+                        <code>{msg.metadata.pendingAction.tool}({JSON.stringify(msg.metadata.pendingAction.params)})</code>
+                      </pre>
+                      <div className="action-buttons">
+                        <button 
+                          className="btn-allow" 
+                          onClick={async () => {
+                            try {
+                              const res = await fetch(`${API_URL}/api/actions/confirm`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ 
+                                  actionId: msg.metadata?.pendingAction?.id, 
+                                  tool: msg.metadata?.pendingAction?.tool, 
+                                  params: msg.metadata?.pendingAction?.params,
+                                  sessionId
+                                })
+                              });
+                              const result = await res.json();
+                              // Simple feedback for now - we just alert the result
+                              alert('Action executed! Result:\n' + JSON.stringify(result.result, null, 2));
+                            } catch(e) {
+                              alert('Failed to execute action.');
+                            }
+                          }}>
+                          Allow Execution
+                        </button>
+                        <button className="btn-deny" onClick={() => alert('Action denied.')}>
+                          Deny
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 {msg.role === "assistant" && (
                   <div className="message-actions">
+                    {msg.metadata?.toolExecuted && (
+                      <span className="message-action-btn provider-badge" title={`Executed Tool: ${msg.metadata.toolExecuted}`} style={{ fontSize: '0.7rem', background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', borderRadius: 12, padding: '2px 10px', cursor: 'default' }}>
+                        ⚙️ Executed {msg.metadata.toolExecuted}
+                      </span>
+                    )}
                     <button
                       className="message-action-btn"
                       onClick={() => playTTS(msg.content, msg.id)}
@@ -619,6 +675,23 @@ export default function Home() {
                         🧠 {msg.metadata.memoriesExtracted}
                       </span>
                     ) : null}
+                    {msg.metadata?.provider && (
+                      <span
+                        className="message-action-btn provider-badge"
+                        title={`Handled by ${msg.metadata.provider}/${msg.metadata.model}`}
+                        style={{
+                          fontSize: '0.7rem',
+                          background: 'rgba(14, 165, 233, 0.08)',
+                          color: 'var(--text-secondary)',
+                          borderRadius: 12,
+                          padding: '2px 10px',
+                          cursor: 'default',
+                          letterSpacing: '0.02em',
+                        }}
+                      >
+                        ⚡ {msg.metadata.provider}/{msg.metadata.model}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -798,6 +871,20 @@ function ProfilePanel({
           </div>
         </div>
       )}
+
+      <div className="panel-card">
+        <div className="panel-card-title">🔌 Integrations</div>
+        <div className="panel-card-value" style={{ marginTop: '8px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+            <input 
+              type="checkbox" 
+              checked={profile.preferences.openclaw_enabled === undefined ? true : profile.preferences.openclaw_enabled === 'true'} 
+              onChange={(e) => onUpdateProfile({ preferences: { ...profile.preferences, openclaw_enabled: e.target.checked ? 'true' : 'false' } })} 
+            />
+            Enable OpenClaw Routing
+          </label>
+        </div>
+      </div>
     </>
   );
 }

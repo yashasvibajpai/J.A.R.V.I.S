@@ -16,7 +16,6 @@ import {
   systemPromptMiddleware,
   llmCallMiddleware,
 } from './engine/pipeline.js';
-import { observabilityMiddleware } from './engine/observability.js';
 import { memoryRecallMiddleware, memoryExtractionMiddleware } from './engine/memory-middleware.js';
 import { profileInjectionMiddleware, profileExtractionMiddleware } from './engine/profile-middleware.js';
 import { taskRecallMiddleware, taskExtractionMiddleware } from './engine/task-middleware.js';
@@ -25,7 +24,8 @@ import { knowledgeMiddleware } from './engine/knowledge-middleware.js';
 import { tokenTruncationMiddleware } from './engine/token-middleware.js';
 import { toolCatalogueMiddleware } from './engine/tool-catalogue.js';
 import { openclawActionMiddleware } from './engine/openclaw-middleware.js';
-import { profileExtractionMiddleware } from './engine/profile-middleware.js';
+import { gbrainMiddleware } from './engine/gbrain-middleware.js';
+import { gbrainExtractionMiddleware } from './engine/gbrain-extraction-middleware.js';
 import { SQLiteMemoryStore } from './stores/SQLiteMemoryStore.js';
 import { SQLiteProfileStore } from './stores/SQLiteProfileStore.js';
 import { SQLiteTaskStore } from './stores/SQLiteTaskStore.js';
@@ -99,22 +99,30 @@ if (process.env.OPENCLAW_ENABLED === 'true') {
 }
 
 // Build the message pipeline
-// Order: observe → system prompt → toolCatalogue → calendar → profile → memory → knowledgeRAG → taskRecall → llmCall → openclawAction → ...
+// Pre-LLM steps: observe → system prompt → toolCatalogue → calendar → profile
+//                → memory → knowledgeRAG → gbrain → taskRecall → tokenTruncation
+// [LLM BOUNDARY]
+// Post-LLM steps (all async fire-and-forget): openclawAction → memoryExtract
+//                → taskExtract → profileExtract → gbrainExtract
 const pipeline = new Pipeline()
   .use(observabilityMiddleware())
   .use(systemPromptMiddleware(systemPrompt))
-  .use(toolCatalogueMiddleware(openclaw))
+  .use(toolCatalogueMiddleware(openclaw, profileStore))
   .use(calendarMiddleware(profileStore))
   .use(profileInjectionMiddleware(profileStore))
   .use(memoryRecallMiddleware(memoryStore))
   .use(knowledgeMiddleware(vectorStore, chain))
+  .use(gbrainMiddleware())
   .use(taskRecallMiddleware(taskStore, reminderStore))
   .use(tokenTruncationMiddleware(6000))
+  .markLlmBoundary()  // ← buildContext() stops here; streaming handles LLM itself
   .use(llmCallMiddleware(chain))
-  .use(openclawActionMiddleware(openclaw, chain))
+  // Post-LLM steps — all use setImmediate internally (fire-and-forget):
+  .use(openclawActionMiddleware(openclaw, chain, profileStore))
   .use(memoryExtractionMiddleware(memoryStore, chain))
   .use(taskExtractionMiddleware(taskStore, reminderStore, captureStore, chain))
-  .use(profileExtractionMiddleware(profileStore, chain));
+  .use(profileExtractionMiddleware(profileStore, chain))
+  .use(gbrainExtractionMiddleware());
 
 console.log('[init] ✓ Pipeline assembled: observe → systemPrompt → calendar → profile → memory → taskRecall → llmCall... etc');
 
@@ -254,11 +262,16 @@ app.post('/api/chat', async (req: Request, res: Response) => {
 });
 
 // Streaming chat endpoint
+// ── Pipeline parity: pre-LLM steps (memory recall, profile injection, RAG,
+//    task recall, token truncation) all run BEFORE streaming begins.
+//    Post-LLM extraction (memory/task/profile) is kicked off async after
+//    the stream completes — same fire-and-forget model as /api/chat. ──────────
 app.post('/api/chat/stream', async (req: Request, res: Response) => {
   try {
-    const { message, history } = req.body as {
+    const { message, history, sessionId: reqSessionId } = req.body as {
       message: string;
       history?: Message[];
+      sessionId?: string;
     };
 
     if (!message || typeof message !== 'string') {
@@ -266,30 +279,81 @@ app.post('/api/chat/stream', async (req: Request, res: Response) => {
       return;
     }
 
-    // Set up SSE headers
+    // ── Session handling (mirrors /api/chat) ─────────────────────────────────
+    let sessionId = reqSessionId;
+    let actualHistory = history ?? [];
+
+    if (sessionId) {
+      actualHistory = sessionStore.getMessages(sessionId);
+    } else {
+      const title = message.length > 30 ? message.substring(0, 30) + '...' : message;
+      const s = sessionStore.createSession(title);
+      sessionId = s.id;
+    }
+
+    if (sessionId) {
+      sessionStore.appendMessage(sessionId, { role: 'user', content: message });
+    }
+
+    // ── Run pre-LLM pipeline steps (recall, inject, truncate) ────────────────
+    // buildContext() stops just before llmCallMiddleware — ctx.messages is now
+    // enriched with memories, profile, calendar, RAG chunks, task list.
+    const ctx = await pipeline.buildContext(message, actualHistory);
+
+    console.log(`\n[stream] session: ${sessionId} | user: "${message.substring(0, 80)}${message.length > 80 ? '...' : ''}"`);
+    if (ctx.metadata.memoriesRecalled) {
+      console.log(`[stream] recalled ${ctx.metadata.memoriesRecalled} memories`);
+    }
+
+    // ── Set up SSE headers ───────────────────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    // Build messages with system prompt + profile + memory recall
-    const messages: Message[] = [
-      { role: 'system', content: systemPrompt },
-      ...(history ?? []),
-      { role: 'user', content: message },
-    ];
-
-    const stream = chain.stream(messages);
+    // ── Stream from the enriched context ─────────────────────────────────────
+    const stream = chain.stream(ctx.messages);
+    let fullResponse = '';
 
     for await (const chunk of stream) {
+      fullResponse += chunk;
       res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
     }
 
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    // ── Send done event with session metadata ────────────────────────────────
+    res.write(`data: ${JSON.stringify({
+      done: true,
+      sessionId,
+      metadata: {
+        memoriesRecalled: ctx.metadata.memoriesRecalled ?? 0,
+        ragSources: ctx.metadata.ragSources || [],
+      },
+    })}\n\n`);
     res.end();
+
+    // ── Persist assistant response ───────────────────────────────────────────
+    if (sessionId && fullResponse) {
+      sessionStore.appendMessage(sessionId, { role: 'assistant', content: fullResponse });
+    }
+
+    // ── Kick off post-LLM extraction (async, non-blocking) ──────────────────
+    // Set the response on ctx so post-LLM middlewares have it.
+    ctx.response = fullResponse;
+    // runPostLlm() triggers openclawAction + all *Extraction middlewares.
+    // Those already use setImmediate internally — this returns immediately.
+    pipeline.runPostLlm(ctx).catch((err) => {
+      console.warn(`[stream] post-LLM pipeline error (non-fatal): ${err}`);
+    });
+
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     console.error(`[stream] error: ${errorMessage}`);
-    res.status(500).json({ error: errorMessage });
+    // If headers already sent (mid-stream failure), write an error event
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
+      res.end();
+    } else {
+      res.status(500).json({ error: errorMessage });
+    }
   }
 });
 
@@ -301,12 +365,12 @@ app.get('/api/sessions', async (_req: Request, res: Response) => {
 });
 
 app.get('/api/sessions/:id/messages', async (req: Request, res: Response) => {
-  const messages = sessionStore.getMessages(req.params.id);
+  const messages = sessionStore.getMessages(req.params.id as string);
   res.json({ messages });
 });
 
 app.delete('/api/sessions/:id', async (req: Request, res: Response) => {
-  sessionStore.deleteSession(req.params.id);
+  sessionStore.deleteSession(req.params.id as string);
   res.json({ deleted: true });
 });
 
@@ -359,7 +423,7 @@ app.get('/api/tasks', async (_req: Request, res: Response) => {
 
 app.patch('/api/tasks/:id', async (req: Request, res: Response) => {
   try {
-    const updated = await taskStore.updateTask(req.params.id, req.body);
+    const updated = await taskStore.updateTask(req.params.id as string, req.body);
     res.json({ task: updated });
   } catch (err: any) {
     res.status(404).json({ error: err.message });
@@ -367,7 +431,7 @@ app.patch('/api/tasks/:id', async (req: Request, res: Response) => {
 });
 
 app.delete('/api/tasks/:id', async (req: Request, res: Response) => {
-  const deleted = await taskStore.deleteTask(req.params.id);
+  const deleted = await taskStore.deleteTask(req.params.id as string);
   res.json({ deleted });
 });
 
@@ -378,7 +442,7 @@ app.get('/api/reminders', async (_req: Request, res: Response) => {
 
 app.patch('/api/reminders/:id', async (req: Request, res: Response) => {
   try {
-    const updated = await reminderStore.updateReminder(req.params.id, req.body);
+    const updated = await reminderStore.updateReminder(req.params.id as string, req.body);
     res.json({ reminder: updated });
   } catch (err: any) {
     res.status(404).json({ error: err.message });
@@ -386,7 +450,7 @@ app.patch('/api/reminders/:id', async (req: Request, res: Response) => {
 });
 
 app.delete('/api/reminders/:id', async (req: Request, res: Response) => {
-  const deleted = await reminderStore.deleteReminder(req.params.id);
+  const deleted = await reminderStore.deleteReminder(req.params.id as string);
   res.json({ deleted });
 });
 
@@ -421,7 +485,7 @@ app.post('/api/voice/transcribe', upload.single('file'), async (req: Request, re
     if (!req.file) throw new Error("No audio file blob provided.");
 
     const formData = new FormData();
-    formData.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'audio.webm');
+    formData.append('file', new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype }), req.file.originalname || 'audio.webm');
 
     const vbRes = await fetch(`${voiceUrl}/transcribe`, {
       method: 'POST',
@@ -556,10 +620,10 @@ app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n─────────────────────────────────────────────────`);
   console.log(`  ${cartridge.identity.name} API is online`);
-  console.log(`  http://localhost:${PORT}`);
+  console.log(`  http://127.0.0.1:${PORT}`);
   console.log(`─────────────────────────────────────────────────`);
   console.log(`  POST /api/chat           — conversation`);
   console.log(`  POST /api/chat/stream    — SSE streaming`);

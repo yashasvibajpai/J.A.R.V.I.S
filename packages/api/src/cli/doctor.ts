@@ -17,6 +17,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 import 'dotenv/config';
+import { contextualInsertionFunction } from '../engine/personalityGbrain.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -135,8 +136,14 @@ async function checkPersonality(): Promise<boolean> {
   return false;
 }
 
+function getDataDir(): string {
+  const primary = resolve(__dirname, '../../../data');
+  if (existsSync(primary)) return primary;
+  return resolve(__dirname, '../../data');
+}
+
 async function checkDataDir(): Promise<boolean> {
-  const dataDir = resolve(__dirname, '../../data');
+  const dataDir = getDataDir();
   if (existsSync(dataDir)) {
     pass('Data directory exists');
     return true;
@@ -156,6 +163,21 @@ async function checkNodeVersion(): Promise<boolean> {
   return false;
 }
 
+async function gbrainDoctor(): Promise<boolean> {
+  if (process.env.GBRAIN_ENABLED !== 'true') {
+    info('GBrain integration disabled (GBRAIN_ENABLED != true)');
+    return true;
+  }
+  const dataDir = getDataDir();
+  if (!existsSync(dataDir)) {
+    warn('Data directory does not exist. Reverting to embeddings');
+    return false;
+  }
+  pass('GBrain integration active');
+  contextualInsertionFunction(dataDir);
+  return true;
+}
+
 // ─── Run ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -173,10 +195,11 @@ async function main() {
   console.log('\n▸ Configuration');
   const personalityOk = await checkPersonality();
   const dataOk = await checkDataDir();
+  const gbrainOk = await gbrainDoctor();
 
   console.log('\n──────────────────────────────────────────────────');
 
-  const allOk = nodeOk && envOk && llmOk && personalityOk && dataOk;
+  const allOk = nodeOk && envOk && llmOk && personalityOk && dataOk && gbrainOk;
 
   if (allOk) {
     console.log('  🟢 JARVIS is ready.\n');

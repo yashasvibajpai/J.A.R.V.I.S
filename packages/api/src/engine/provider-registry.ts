@@ -151,7 +151,7 @@ export function buildProviderRegistry(): ProviderProfile[] {
       provider: new OpenAICompatibleAdapter({
         apiKey: process.env.OPENROUTER_API_KEY,
         baseURL: 'https://openrouter.ai/api/v1',
-        model: 'openrouter/auto',
+        model: 'openrouter/free',
         providerId: 'openrouter',
         contextWindow: 128_000,
         supportsTools: false,
@@ -161,14 +161,14 @@ export function buildProviderRegistry(): ProviderProfile[] {
         },
       }),
       providerId: 'openrouter',
-      modelId: 'auto',
+      modelId: 'free',
       scores: { general: 6, coding: 5, reasoning: 6, creative: 6, quick: 5, tool_use: 5, embedding: 0 },
       limits: { rpm: 20, rpd: 50, tokensPerDay: 500_000 }, // conservative for free tier
       state: freshState(),
       tier: 'free',
       contextWindow: 128_000,
     });
-    console.log('[registry] ✓ OpenRouter (auto) registered — free tier');
+    console.log('[registry] ✓ OpenRouter (free) registered — free tier');
   }
 
   // Ollama Cloud — large models on remote infrastructure

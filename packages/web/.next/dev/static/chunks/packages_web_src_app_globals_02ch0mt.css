@@ -868,4 +868,77 @@ a:hover {
   background: #0ea5e926;
 }
 
+.action-confirmation-modal {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  background: #0f172ab3;
+  border-left: 3px solid #ef4444;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.action-header {
+  color: #ef4444;
+  font-family: var(--font-rajdhani);
+  letter-spacing: .05em;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: .5rem;
+  font-size: 1.1rem;
+  display: flex;
+}
+
+.action-code-block {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  color: var(--text-accent);
+  background: #0000004d;
+  margin: .75rem 0;
+  padding: .75rem;
+  font-size: .85rem;
+  overflow-x: auto;
+}
+
+.action-buttons {
+  gap: .5rem;
+  margin-top: 1rem;
+  display: flex;
+}
+
+.btn-allow {
+  color: #10b981;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-rajdhani);
+  transition: all var(--duration-fast);
+  background: #10b98126;
+  border: 1px solid #10b981;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+.btn-allow:hover {
+  color: #fff;
+  background: #10b981;
+}
+
+.btn-deny {
+  color: #ef4444;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-rajdhani);
+  transition: all var(--duration-fast);
+  background: #ef444426;
+  border: 1px solid #ef4444;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+.btn-deny:hover {
+  color: #fff;
+  background: #ef4444;
+}
+
 /*# sourceMappingURL=packages_web_src_app_globals_02ch0mt.css.map*/

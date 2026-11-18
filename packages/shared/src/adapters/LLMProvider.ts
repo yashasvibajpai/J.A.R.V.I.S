@@ -11,10 +11,15 @@ export interface Message {
 
 // ─── LLM Configuration ──────────────────────────────────────────────────────
 
+/** Task categories used by the SmartRouter for intelligent provider selection */
+export type TaskType = 'general' | 'coding' | 'reasoning' | 'creative' | 'quick' | 'tool_use' | 'embedding';
+
 export interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
   stopSequences?: string[];
+  /** Hint from the pipeline about what kind of task this is — used by SmartRouter for routing */
+  taskHint?: TaskType;
 }
 
 export interface LLMCapabilities {

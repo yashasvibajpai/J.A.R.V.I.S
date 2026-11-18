@@ -1,5 +1,6 @@
 import type { MemoryStore, LLMProvider } from '@jarvis/shared';
 import type { Middleware } from './pipeline.js';
+import { parseMemoryOutput } from './llm-output.js';
 
 /**
  * Memory Recall Middleware — runs BEFORE the LLM call.
@@ -52,50 +53,65 @@ export function memoryRecallMiddleware(memoryStore: MemoryStore): Middleware {
  *
  * Uses the LLM itself to extract facts worth remembering from the
  * conversation exchange. This is how JARVIS *learns* about you.
+ *
+ * ⚡ ASYNC WRITE PATH: extraction is intentionally fire-and-forget.
+ * The HTTP response is NOT held open waiting for this — it schedules
+ * the write via setImmediate so it runs after the response is flushed.
  */
 export function memoryExtractionMiddleware(
   memoryStore: MemoryStore,
   llm: LLMProvider
 ): Middleware {
   return async (ctx, next) => {
-    await next(); // Let the LLM respond first
+    await next(); // Let the LLM respond first; response is now set on ctx
 
     // Don't extract from trivial exchanges
     if (!ctx.response || ctx.userMessage.trim().length < 10) return;
 
-    try {
-      const extraction = await llm.chat([
-        {
-          role: 'system',
-          content: EXTRACTION_PROMPT,
-        },
-        {
-          role: 'user',
-          content: `User said: "${ctx.userMessage}"\n\nAssistant replied: "${ctx.response}"`,
-        },
-      ], { temperature: 0.1, maxTokens: 512 });
+    // ── Fire-and-forget: schedule after the current event loop tick ──────────
+    // The calling code (pipeline.run) has already returned ctx to the route
+    // handler, which sends the HTTP response. This extraction runs in the
+    // background — if it fails, it logs a warning but never affects the user.
+    const userMessage = ctx.userMessage;
+    const response = ctx.response;
 
-      const facts = parseExtraction(extraction);
+    setImmediate(async () => {
+      try {
+        const extraction = await llm.chat([
+          {
+            role: 'system',
+            content: EXTRACTION_PROMPT,
+          },
+          {
+            role: 'user',
+            content: `User said: "${userMessage}"\n\nAssistant replied: "${response}"`,
+          },
+        ], { temperature: 0.1, maxTokens: 512 });
 
-      if (facts.length > 0) {
-        for (const fact of facts) {
-          // Check for duplicates before adding
-          const existing = await memoryStore.search(fact.content, 3);
-          const isDuplicate = existing.some(
-            (m) => similarity(m.content, fact.content) > 0.8
-          );
+        const facts = parseMemoryOutput(extraction);
 
-          if (!isDuplicate) {
-            await memoryStore.add(fact.content, fact.category);
-            console.log(`[memory] stored: [${fact.category}] ${fact.content}`);
+        if (facts.length > 0) {
+          for (const fact of facts) {
+            // Check for duplicates before adding
+            const existing = await memoryStore.search(fact.content, 3);
+            const isDuplicate = existing.some(
+              (m) => similarity(m.content, fact.content) > 0.8
+            );
+
+            if (!isDuplicate) {
+              await memoryStore.add(fact.content, fact.category);
+              console.log(`[memory:bg] stored: [${fact.category}] ${fact.content}`);
+            }
           }
+          console.log(`[memory:bg] extraction complete — ${facts.length} fact(s) processed`);
         }
-        ctx.metadata.memoriesExtracted = facts.length;
+      } catch (err) {
+        console.warn(`[memory:bg] extraction failed (non-fatal): ${err}`);
       }
-    } catch (err) {
-      // Extraction is non-critical — don't break the conversation
-      console.warn(`[memory] extraction failed: ${err}`);
-    }
+    });
+
+    // Mark that extraction was kicked off (not necessarily completed yet)
+    ctx.metadata.memoriesExtractionScheduled = true;
   };
 }
 
@@ -125,36 +141,6 @@ Examples:
 If nothing worth remembering: NONE`;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-interface ExtractedFact {
-  category: 'fact' | 'preference' | 'event' | 'goal' | 'relationship' | 'context';
-  content: string;
-}
-
-function parseExtraction(raw: string): ExtractedFact[] {
-  if (raw.trim() === 'NONE' || raw.trim() === '') return [];
-
-  const facts: ExtractedFact[] = [];
-  const lines = raw.split('\n').filter(Boolean);
-
-  for (const line of lines) {
-    const match = line.match(/^\[(\w+)]\s*(.+)$/);
-    if (match) {
-      const category = match[1] as ExtractedFact['category'];
-      const content = match[2].trim();
-      if (
-        ['fact', 'preference', 'event', 'goal', 'relationship', 'context'].includes(
-          category
-        ) &&
-        content.length > 5
-      ) {
-        facts.push({ category, content });
-      }
-    }
-  }
-
-  return facts;
-}
 
 /**
  * Simple string similarity (Jaccard index on word sets).

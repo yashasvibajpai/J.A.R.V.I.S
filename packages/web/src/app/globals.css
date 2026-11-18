@@ -884,3 +884,77 @@ a:hover { text-decoration: underline; }
   border: 1px inset var(--accent);
   color: var(--accent);
 }
+
+/* ─── Action Confirmation Modal ────────────────────────────────────────────── */
+
+.action-confirmation-modal {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--border);
+  border-left: 3px solid #ef4444; /* red for destructive */
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(10px);
+}
+
+.action-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ef4444;
+  margin-bottom: 0.5rem;
+  font-family: var(--font-rajdhani);
+  font-size: 1.1rem;
+  letter-spacing: 0.05em;
+}
+
+.action-code-block {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.75rem;
+  border-radius: var(--radius-sm);
+  margin: 0.75rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-accent);
+  overflow-x: auto;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.btn-allow {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid #10b981;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-rajdhani);
+  font-weight: 600;
+  transition: all var(--duration-fast);
+}
+
+.btn-allow:hover {
+  background: #10b981;
+  color: white;
+}
+
+.btn-deny {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid #ef4444;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-rajdhani);
+  font-weight: 600;
+  transition: all var(--duration-fast);
+}
+
+.btn-deny:hover {
+  background: #ef4444;
+  color: white;
+}

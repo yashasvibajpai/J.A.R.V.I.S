@@ -1,5 +1,6 @@
 import type { TaskStore, ReminderStore, CaptureStore, LLMProvider } from '@jarvis/shared';
 import type { Middleware } from './pipeline.js';
+import { parseTaskOutput } from './llm-output.js';
 
 /**
  * Task Recall Middleware — runs BEFORE the LLM call.
@@ -48,6 +49,10 @@ export function taskRecallMiddleware(
 /**
  * Task Extraction Middleware — runs AFTER the LLM call.
  * Extracts new tasks, reminders, and thoughts from the conversation block.
+ *
+ * ⚡ ASYNC WRITE PATH: extraction is fire-and-forget via setImmediate.
+ * Output is validated with parseTaskOutput() — malformed lines from
+ * small models are silently skipped (no store corruption).
  */
 export function taskExtractionMiddleware(
   taskStore: TaskStore,
@@ -60,53 +65,61 @@ export function taskExtractionMiddleware(
 
     if (!ctx.response || ctx.userMessage.trim().length < 5) return;
 
-    try {
-      const extraction = await llm.chat([
-        { role: 'system', content: TASK_EXTRACTION_PROMPT },
-        { role: 'user', content: `User: "${ctx.userMessage}"\nJARVIS: "${ctx.response}"` }
-      ], { temperature: 0.1, maxTokens: 512 });
+    // Capture values before async boundary
+    const userMessage = ctx.userMessage;
+    const response = ctx.response;
 
-      const actions = parseTaskExtraction(extraction);
+    // ── Fire-and-forget ───────────────────────────────────────────────────────
+    setImmediate(async () => {
+      try {
+        const extraction = await llm.chat([
+          { role: 'system', content: TASK_EXTRACTION_PROMPT },
+          { role: 'user', content: `User: "${userMessage}"\nJARVIS: "${response}"` }
+        ], { temperature: 0.1, maxTokens: 512 });
 
-      for (const action of actions) {
-        if (action.type === 'task_create') {
-          await taskStore.createTask({
-             description: action.content,
-             status: 'pending',
-             priority: 'medium',
-             tags: []
-          });
-          console.log(`[task] created task: ${action.content}`);
-        } else if (action.type === 'task_complete') {
-          // Fallback, as our simple regex might just grab a string instead of ID.
-          // In a real system, you'd match the task by description/FTS, but here we'll try ID.
-          try {
-             await taskStore.updateTask(action.content, { status: 'completed' });
-             console.log(`[task] completed task: ${action.content}`);
-          } catch(e) {
-             console.warn(`[task] failed to complete task ${action.content}`);
+        // ── Validated parse — unknown action types and malformed lines dropped ─
+        const actions = parseTaskOutput(extraction);
+
+        for (const action of actions) {
+          if (action.type === 'task_create') {
+            await taskStore.createTask({
+              description: action.content,
+              status: 'pending',
+              priority: 'medium',
+              tags: []
+            });
+            console.log(`[task:bg] created task: ${action.content}`);
+          } else if (action.type === 'task_complete') {
+            try {
+              await taskStore.updateTask(action.content, { status: 'completed' });
+              console.log(`[task:bg] completed task: ${action.content}`);
+            } catch (e) {
+              console.warn(`[task:bg] failed to complete task ${action.content}`);
+            }
+          } else if (action.type === 'reminder_create') {
+            await reminderStore.createReminder({
+              description: action.content,
+              completed: false
+            });
+            console.log(`[task:bg] created reminder: ${action.content}`);
+          } else if (action.type === 'capture') {
+            await captureStore.createCapture({
+              content: action.content,
+              category: 'thought'
+            });
+            console.log(`[task:bg] captured thought: ${action.content}`);
           }
-        } else if (action.type === 'reminder_create') {
-          await reminderStore.createReminder({
-             description: action.content,
-             completed: false
-          });
-          console.log(`[task] created reminder: ${action.content}`);
-        } else if (action.type === 'capture') {
-          await captureStore.createCapture({
-             content: action.content,
-             category: 'thought'
-          });
-          console.log(`[task] captured thought: ${action.content}`);
         }
+
+        if (actions.length > 0) {
+          console.log(`[task:bg] extraction complete — ${actions.length} action(s) processed`);
+        }
+      } catch (err) {
+        console.warn(`[task:bg] extraction failed (non-fatal): ${err}`);
       }
-      
-      if (actions.length > 0) {
-         ctx.metadata.tasksExtracted = actions.length;
-      }
-    } catch (err) {
-      console.warn(`[task] extraction failed: ${err}`);
-    }
+    });
+
+    ctx.metadata.taskExtractionScheduled = true;
   };
 }
 
@@ -121,22 +134,3 @@ Only extract if the user implicitly or explicitly requested it. If nothing, outp
 Example:
 [task_create] Buy groceries tomorrow
 [capture] Gamify the onboarding flow`;
-
-function parseTaskExtraction(raw: string) {
-  if (raw.trim() === 'NONE' || raw.trim() === '') return [];
-  const lines = raw.split('\n').filter(Boolean);
-  const actions = [];
-  
-  for (const line of lines) {
-    const match = line.match(/\[(task_create|task_complete|reminder_create|capture)\]\s*(.+)/);
-    if (match) {
-      actions.push({ type: match[1], content: match[2].trim() });
-    }
-  }
-
-  if (actions.length === 0 && raw.trim() !== 'NONE') {
-    console.debug(`[task] Extracted nothing but LLM returned: ${raw}`);
-  }
-
-  return actions;
-}
