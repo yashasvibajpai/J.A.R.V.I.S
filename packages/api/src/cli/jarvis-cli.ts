@@ -89,7 +89,7 @@ async function initJarvisSystem() {
   await vectorStore.init();
 
   const webSearch = new WebSearchService();
-  const fileService = new FileService(resolve(process.cwd(), 'documents'));
+  const fileService = new FileService();
 
   // Assemble CLI Message Pipeline
   const pipeline = new Pipeline()

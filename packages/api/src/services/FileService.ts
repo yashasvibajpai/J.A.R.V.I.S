@@ -1,5 +1,6 @@
 import { writeFileSync, readFileSync, readdirSync, statSync, mkdirSync, existsSync } from 'fs';
-import { resolve, dirname, basename, extname } from 'path';
+import { resolve, dirname, basename, extname, isAbsolute } from 'path';
+import { homedir } from 'os';
 import { PdfService } from './PdfService.js';
 
 export interface FileWriteResult {
@@ -16,7 +17,7 @@ export interface FileWriteResult {
  * - Create and save Markdown documents (.md)
  * - Generate professional PDF documents (.pdf) from text or markdown
  * - Read and inspect files
- * - Save directly to workspace, documents directory, or Obsidian Vault
+ * - Save directly to Downloads folder (never polluting repo directories) or Obsidian Vault
  */
 export class FileService {
   private pdfService: PdfService;
@@ -25,23 +26,43 @@ export class FileService {
 
   constructor(defaultDocDir?: string) {
     this.pdfService = new PdfService();
-    this.defaultDocDir = defaultDocDir || resolve(process.cwd(), 'documents');
+    // Default destination is strictly the user's Downloads directory (~/Downloads)
+    // to prevent cluttering or polluting repository workspace folders.
+    this.defaultDocDir = defaultDocDir || resolve(homedir(), 'Downloads');
     this.obsidianVaultPath = process.env.OBSIDIAN_VAULT_PATH;
   }
 
   /**
-   * Save a markdown document to disk.
+   * Resolves target destination file path.
+   * Redirects any repository-internal paths or relative paths to the user's Downloads directory.
+   */
+  private resolveTargetFile(filename: string, targetDir?: string): string {
+    if (targetDir) {
+      return resolve(targetDir, basename(filename));
+    }
+
+    if (isAbsolute(filename)) {
+      // If an absolute path targets inside the repository workspace, redirect to Downloads
+      if (filename.startsWith(process.cwd())) {
+        return resolve(this.defaultDocDir, basename(filename));
+      }
+      return filename;
+    }
+
+    // Strip leading "documents/", "./documents/", or "./"
+    const cleaned = filename
+      .replace(/^(\.\/)?documents[\\/]/, '')
+      .replace(/^(\.\/)+/, '');
+
+    return resolve(this.defaultDocDir, cleaned);
+  }
+
+  /**
+   * Save a markdown document to disk (defaults to ~/Downloads).
    */
   async createMarkdown(filename: string, content: string, targetDir?: string): Promise<FileWriteResult> {
     const cleanName = filename.endsWith('.md') ? filename : `${filename}.md`;
-    let fullPath: string;
-    if (targetDir) {
-      fullPath = resolve(targetDir, cleanName);
-    } else if (filename.includes('/') || filename.includes('\\')) {
-      fullPath = resolve(process.cwd(), cleanName);
-    } else {
-      fullPath = resolve(this.defaultDocDir, cleanName);
-    }
+    const fullPath = this.resolveTargetFile(cleanName, targetDir);
 
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, content, 'utf-8');
@@ -56,7 +77,7 @@ export class FileService {
   }
 
   /**
-   * Generate and save a formatted PDF document from markdown or text.
+   * Generate and save a formatted PDF document from markdown or text (defaults to ~/Downloads).
    */
   async createPdf(
     filename: string,
@@ -65,14 +86,7 @@ export class FileService {
     title?: string
   ): Promise<FileWriteResult> {
     const cleanName = filename.endsWith('.pdf') ? filename : `${filename}.pdf`;
-    let fullPath: string;
-    if (targetDir) {
-      fullPath = resolve(targetDir, cleanName);
-    } else if (filename.includes('/') || filename.includes('\\')) {
-      fullPath = resolve(process.cwd(), cleanName);
-    } else {
-      fullPath = resolve(this.defaultDocDir, cleanName);
-    }
+    const fullPath = this.resolveTargetFile(cleanName, targetDir);
 
     const docTitle = title || basename(cleanName, '.pdf').replace(/[-_]/g, ' ');
     await this.pdfService.markdownToPdf(markdownContent, fullPath, { title: docTitle });
@@ -87,10 +101,10 @@ export class FileService {
   }
 
   /**
-   * Write any text or code file.
+   * Write any text or code file (defaults to ~/Downloads).
    */
   async writeFile(filePath: string, content: string): Promise<FileWriteResult> {
-    const fullPath = resolve(process.cwd(), filePath);
+    const fullPath = this.resolveTargetFile(filePath);
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, content, 'utf-8');
 
@@ -125,25 +139,34 @@ export class FileService {
    * Read file content.
    */
   readFile(filePath: string): string {
-    const fullPath = resolve(process.cwd(), filePath);
+    let fullPath = filePath;
     if (!existsSync(fullPath)) {
-      throw new Error(`File does not exist: ${fullPath}`);
+      fullPath = this.resolveTargetFile(filePath);
+    }
+    if (!existsSync(fullPath)) {
+      fullPath = resolve(process.cwd(), filePath);
+    }
+    if (!existsSync(fullPath)) {
+      throw new Error(`File does not exist: ${filePath}`);
     }
     return readFileSync(fullPath, 'utf-8');
   }
 
   /**
-   * List files in a directory.
+   * List files in a directory (defaults to ~/Downloads).
    */
-  listFiles(dirPath = '.'): Array<{ name: string; isDirectory: boolean; size: number }> {
-    const fullPath = resolve(process.cwd(), dirPath);
-    if (!existsSync(fullPath)) {
-      throw new Error(`Directory does not exist: ${fullPath}`);
+  listFiles(dirPath?: string): Array<{ name: string; isDirectory: boolean; size: number }> {
+    const target = dirPath
+      ? (dirPath === 'documents' || dirPath === './documents' ? this.defaultDocDir : resolve(process.cwd(), dirPath))
+      : this.defaultDocDir;
+
+    if (!existsSync(target)) {
+      return [];
     }
 
-    const entries = readdirSync(fullPath, { withFileTypes: true });
+    const entries = readdirSync(target, { withFileTypes: true });
     return entries.map((entry) => {
-      const entryPath = resolve(fullPath, entry.name);
+      const entryPath = resolve(target, entry.name);
       let size = 0;
       try {
         if (!entry.isDirectory()) {
