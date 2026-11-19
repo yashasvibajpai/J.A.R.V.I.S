@@ -54,7 +54,7 @@ async function checkLLMProviders(): Promise<boolean> {
 
   // Groq
   if (process.env.GROQ_API_KEY) {
-    pass(`Groq configured (${process.env.GROQ_MODEL || 'deepseek-r1-distill-llama-70b'})`);
+    pass(`Groq configured (${process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'})`);
     anyAvailable = true;
   } else {
     info('GROQ_API_KEY not set (optional)');

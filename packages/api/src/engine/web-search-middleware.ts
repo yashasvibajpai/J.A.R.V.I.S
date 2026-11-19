@@ -11,24 +11,41 @@ const REALTIME_KEYWORDS = [
 ];
 
 /**
- * Extracts clean search keywords from a conversational prompt by stripping
- * command verbs, document generation instructions, and meta requirements.
+ * Extracts clean, concise search keywords from a conversational prompt by stripping
+ * command verbs, document generation instructions, meta requirements, and filler.
+ * Aims to produce a short, focused query (under ~80 chars) for search engines.
  */
 export function extractSearchKeywords(prompt: string): string {
   let cleaned = prompt
-    // Strip leading action / document compilation requests
-    .replace(/\b(create|generate|compile|write|make|give me|show me|draft|produce)\s+(a\s+)?(brief\s+)?(pdf\s+)?(report|document|summary|overview|brief|article|essay)\s+(on|about|for|regarding)?\b/gi, '')
-    // Strip save-as directives
-    .replace(/\b(save\s+(as|to)\s+.*|\.pdf|\.md|\.txt)\b/gi, '')
-    // Strip meta requirements / instructions
+    // Strip leading action / conversational commands
+    .replace(/^(can you\s+)?(please\s+)?(analyze|evaluate|investigate|assess|summarize|review|explain|compare|give me|show me)\s+/i, '')
+    // Strip leading document compilation requests
+    .replace(/\b(create|generate|compile|write|make|draft|produce)\s+(a\s+)?(brief\s+)?(detailed\s+)?(comprehensive\s+)?(pdf\s+)?(md\s+)?(markdown\s+)?(report|document|summary|overview|brief|article|essay|file|paper)\s*(on|about|for|regarding|into|in)?\b/gi, '')
+    // Strip save-as / output format directives
+    .replace(/\b(save\s+(as|to)\s+.*|put\s+it\s+in\s+.*|\.pdf|\.md|\.txt)\b/gi, '')
+    // Strip meta requirements / "along with" tails
     .replace(/\b(along\s*with|alongwith|including|as well as|covering|detailing|with details on)\b.*/gi, '')
+    // Strip evaluation / analysis tails
+    .replace(/\b(and\s+)?(evaluate|explain|assess|investigate|determine|figure out|understand)\s+(why|how|what|whether|if)?\s*.*/gi, '')
+    // Strip filler phrases
+    .replace(/\b(the\s+)?(prices?\s+are\s+the\s+way\s+they\s+are|reasons?\s+behind\s+it|what\s+caused\s+it)\b/gi, '')
     // Strip punctuation
-    .replace(/[,\.?!;:"]/g, ' ')
+    .replace(/[,\.?!;:\"]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
-  // If cleaning resulted in too short a phrase (< 3 chars), fallback to prompt
-  return cleaned.length >= 3 ? cleaned : prompt;
+  // If still too long (>80 chars), take first meaningful N words
+  if (cleaned.length > 80) {
+    const words = cleaned.split(' ').filter(w => w.length > 1);
+    cleaned = words.slice(0, 8).join(' ');
+  }
+
+  // If cleaning resulted in too short a phrase (< 3 chars), fallback to first ~60 chars of prompt
+  if (cleaned.length < 3) {
+    cleaned = prompt.substring(0, 60).trim();
+  }
+
+  return cleaned;
 }
 
 /**
@@ -64,14 +81,17 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
         }
 
         if (results.length > 0) {
-          const dateStr = new Date().toLocaleDateString('en-US', {
+          const now = new Date();
+          const dateStr = now.toLocaleDateString('en-US', {
             timeZone: 'Asia/Kolkata',
             dateStyle: 'full',
           });
+          const isoDate = now.toISOString().split('T')[0];
 
           let searchBlock = `## Real-Time Live Web Results (${dateStr})\n`;
-          searchBlock += `The following live web search results were freshly retrieved for this query. Use these verified facts to provide an accurate, up-to-date answer. Cite your sources naturally where relevant.\n`;
-          searchBlock += `Provide comprehensive, objective historical analysis and research based on these findings. For financial, market, or macroeconomic questions, deliver factual news synthesis and market trend evaluation for research/educational purposes.\n\n`;
+          searchBlock += `TODAY'S DATE IS ${isoDate}. The current year is ${now.getFullYear()}.\n`;
+          searchBlock += `The following live web search results were freshly retrieved for this query. Use ONLY these verified, up-to-date facts to provide an accurate answer grounded in the CURRENT date shown above. Do NOT use training data from past years — only the live results below.\n`;
+          searchBlock += `For financial, market, or macroeconomic questions, deliver factual news synthesis and market trend evaluation for research/educational purposes. Cite sources naturally.\n\n`;
 
           for (const res of results) {
             searchBlock += `- [${res.source || 'Web'}] **${res.title}**\n`;
