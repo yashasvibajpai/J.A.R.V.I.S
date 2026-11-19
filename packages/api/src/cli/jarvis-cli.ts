@@ -157,6 +157,7 @@ async function runInteractiveRepl() {
 
   const session = sys.sessionStore.createSession('CLI Session');
   let history: Message[] = [];
+  let activeReasoningEffort: 'low' | 'medium' | 'high' | undefined = undefined;
 
   while (true) {
     let input = '';
@@ -169,24 +170,41 @@ async function runInteractiveRepl() {
     const trimmed = input.trim();
     if (!trimmed) continue;
 
-    // ── Slash Commands ───────────────────────────────────────────────────────
-    if (trimmed.startsWith('/')) {
-      const handled = await handleSlashCommand(trimmed, sys, rl, history);
+    let activeQuery = trimmed;
+    let queryEffort: 'low' | 'medium' | 'high' | undefined = activeReasoningEffort;
+
+    // ── Deep Investigation Prefix /deep <query> ──────────────────────────────
+    if (trimmed.startsWith('/deep ')) {
+      activeQuery = trimmed.slice(6).trim();
+      queryEffort = 'high';
+      console.log(`\n${c.magenta}🧠 Deep Reasoning Matrix Engaged${c.reset} ${c.dim}(reasoning_effort: high)${c.reset}\n`);
+    } else if (trimmed.startsWith('/')) {
+      const handled = await handleSlashCommand(trimmed, sys, rl, history, {
+        getReasoning: () => activeReasoningEffort,
+        setReasoning: (val) => {
+          activeReasoningEffort = val;
+        },
+      });
       if (handled === 'EXIT') break;
       if (handled === 'CLEARED') history = [];
       continue;
     }
 
     // ── Run Query Through Pipeline with Marvel Spinner ───────────────────────
-    const spinner = new JarvisSpinner();
+    const spinner = new JarvisSpinner(
+      queryEffort === 'high' ? 'Engaging deep deliberative reasoning matrix...' : undefined
+    );
     spinner.start();
     let streamStarted = false;
 
     try {
-      const ctx = await sys.pipeline.buildContext(trimmed, history);
+      const ctx = await sys.pipeline.buildContext(activeQuery, history);
 
-      // Stream response to terminal
-      const stream = sys.router.stream(ctx.messages);
+      // Stream response to terminal with designated reasoning effort
+      const stream = sys.router.stream(
+        ctx.messages,
+        queryEffort ? { reasoningEffort: queryEffort, taskHint: queryEffort === 'high' ? 'reasoning' : undefined } : undefined
+      );
       let fullResponse = '';
 
       for await (const chunk of stream) {
@@ -224,7 +242,7 @@ async function runInteractiveRepl() {
               decisionMsg += '\nPlease proceed with the implementation according to these specifications.';
 
               // Send decisions back to the LLM turn
-              history.push({ role: 'user', content: trimmed });
+              history.push({ role: 'user', content: activeQuery });
               history.push({ role: 'assistant', content: fullResponse });
               history.push({ role: 'user', content: decisionMsg });
 
@@ -233,7 +251,10 @@ async function runInteractiveRepl() {
               let followUpStarted = false;
 
               const followUpCtx = await sys.pipeline.buildContext(decisionMsg, history);
-              const followUpStream = sys.router.stream(followUpCtx.messages);
+              const followUpStream = sys.router.stream(
+                followUpCtx.messages,
+                queryEffort ? { reasoningEffort: queryEffort, taskHint: queryEffort === 'high' ? 'reasoning' : undefined } : undefined
+              );
               let followUpResponse = '';
 
               for await (const chunk of followUpStream) {
@@ -299,7 +320,11 @@ async function handleSlashCommand(
   cmdLine: string,
   sys: Awaited<ReturnType<typeof initJarvisSystem>>,
   rl: readline.Interface,
-  _history: Message[]
+  _history: Message[],
+  reasoningControls?: {
+    getReasoning: () => 'low' | 'medium' | 'high' | undefined;
+    setReasoning: (val: 'low' | 'medium' | 'high' | undefined) => void;
+  }
 ): Promise<string | void> {
   const [cmd, ...args] = cmdLine.split(' ');
   const rest = args.join(' ').trim();
@@ -314,6 +339,28 @@ async function handleSlashCommand(
       printBanner();
       console.log(`${c.green}✓ Session history cleared.${c.reset}\n`);
       return 'CLEARED';
+
+    // ── Reasoning Engine Effort Control ──────────────────────────────────────
+    case '/reason': {
+      const mode = rest.toLowerCase();
+      if (!mode) {
+        const current = reasoningControls?.getReasoning() ?? 'auto (SmartRouter adaptive)';
+        console.log(`\n${c.bold}Reasoning Engine Configuration:${c.reset}`);
+        console.log(`  • Active Level: ${c.cyan}${current}${c.reset}`);
+        console.log(`  • Usage:        ${c.yellow}/reason high${c.reset} | ${c.yellow}/reason medium${c.reset} | ${c.yellow}/reason low${c.reset} | ${c.yellow}/reason auto${c.reset}\n`);
+        break;
+      }
+      if (mode === 'high' || mode === 'medium' || mode === 'low') {
+        reasoningControls?.setReasoning(mode);
+        console.log(`${c.green}✓ Reasoning effort set to:${c.reset} ${c.bold}${mode.toUpperCase()}${c.reset} (Allocating extended deliberation tokens)\n`);
+      } else if (mode === 'auto') {
+        reasoningControls?.setReasoning(undefined);
+        console.log(`${c.green}✓ Reasoning effort reset to:${c.reset} ${c.bold}AUTO${c.reset} (SmartRouter will select dynamically per task)\n`);
+      } else {
+        console.log(`${c.yellow}Invalid option. Use:${c.reset} /reason [high | medium | low | auto]\n`);
+      }
+      break;
+    }
 
     // ── Signature Feature 2: Ephemeral Side Questions with /btw ──────────────
     case '/btw': {
@@ -391,6 +438,8 @@ async function handleSlashCommand(
     case '/help':
       console.log(`
 ${c.bold}Signature Agent Capabilities:${c.reset}
+  ${c.magenta}/reason [low|med|high|auto]${c.reset} Adjust reasoning effort & thinking token depth
+  ${c.magenta}/deep <query>${c.reset}              Run query with deep analytical investigation and maximum reasoning
   ${c.magenta}/btw <question>${c.reset}           Ephemeral side question in a floating card (leaves main context clean)
   ${c.brightCyan}/ask${c.reset}                      Launch interactive tabbed design decision form wizard
   ${c.yellow}/help${c.reset}                     Show this command guide
@@ -405,6 +454,8 @@ ${c.bold}Signature Agent Capabilities:${c.reset}
   ${c.yellow}/exit${c.reset}                     Exit JARVIS CLI
 
 ${c.bold}Natural Language Agent Commands:${c.reset}
+  • Ask for deep investigations:
+    ${c.cyan}"/deep Create a comprehensive outage report with root causes and blast radiuses"${c.reset}
   • Ask for architectural decisions:
     ${c.cyan}"I want to build a new telemetry microservice. Ask me for my preferences first."${c.reset}
   • Ask for document/PDF generation:
@@ -419,11 +470,13 @@ ${c.bold}Natural Language Agent Commands:${c.reset}
       const memoryCount = await sys.memoryStore.count();
       const profile = await sys.profileStore.getProfile('default');
       const vectorCount = await sys.vectorStore.count();
+      const currentReasoning = reasoningControls?.getReasoning()?.toUpperCase() ?? 'Adaptive (SmartRouter)';
       console.log(`  • Memories in SQLite:  ${c.cyan}${memoryCount}${c.reset}`);
       console.log(`  • Obsidian LanceDB:    ${c.cyan}${vectorCount} chunks${c.reset}`);
       const roleStr = typeof profile?.context?.role === 'string' ? profile.context.role : 'User';
       console.log(`  • User Profile:        ${c.cyan}${profile?.name || 'User'}${c.reset} (${roleStr})`);
       console.log(`  • Workspace Root:      ${c.cyan}${process.cwd()}${c.reset}`);
+      console.log(`  • Reasoning Effort:    ${c.cyan}${currentReasoning}${c.reset}`);
       console.log(`  • Active Protocols:    ${c.cyan}Vision/Stark Protocol v1.0.0${c.reset}\n`);
       break;
     }

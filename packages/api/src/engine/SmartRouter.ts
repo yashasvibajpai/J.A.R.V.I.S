@@ -12,6 +12,7 @@ const CODING_KEYWORDS = [
   'class', 'const ', 'let ', 'var ', 'def ', 'async', 'await',
   'npm', 'pnpm', 'yarn', 'git', 'docker', 'api', 'endpoint',
   'bug', 'fix', 'refactor', 'test', 'module', 'package',
+  'script', 'scripts',
   '```', 'stacktrace', 'traceback', 'exception', '.ts', '.js', '.py',
 ];
 
@@ -20,6 +21,10 @@ const REASONING_KEYWORDS = [
   'trade-off', 'pros and cons', 'difference between', 'best approach',
   'architecture', 'design', 'strategy', 'plan', 'think through',
   'implications', 'consequences', 'reasoning', 'logic',
+  'investigate', 'investigation', 'root cause', 'post-mortem',
+  'incident report', 'outage', 'outages', 'downtime', 'impact',
+  'reasons', 'comprehensive', 'deep dive', 'audit', 'findings',
+  'timeline', 'assessment', 'synthesis', 'breakdown', 'why did',
 ];
 
 const CREATIVE_KEYWORDS = [
@@ -37,8 +42,7 @@ const TOOL_USE_KEYWORDS = [
   'breaking news', 'current events', 'today in', 'news on', 'weather in',
   'stock price', 'price of',
   'create pdf', 'generate pdf', 'compile pdf', 'save pdf', '.pdf', 'pdf report', 'pdf',
-  'create file', 'save to file', 'save as', 'write to file', 'outage', 'outages',
-  'downtime', 'incident report', 'briefing',
+  'create file', 'save to file', 'save as', 'write to file',
 ];
 
 /**
@@ -49,32 +53,44 @@ export function classifyTask(userMessage: string, _history?: Message[]): TaskTyp
   const lower = userMessage.toLowerCase();
   const wordCount = userMessage.trim().split(/\s+/).length;
 
-  // Tool use — explicit action, document/PDF generation, or real-time information requests
-  if (
+  const isDocumentOrFileAction =
     TOOL_USE_KEYWORDS.some(k => lower.includes(k)) ||
-    /\b(create|generate|compile|save|make|produce)\b.*\b(pdf|report|file|document|briefing|summary)\b/i.test(lower) ||
-    /\b(outages?|downtimes?)\b/i.test(lower)
-  ) {
+    /\b(create|generate|compile|save|make|produce)\b.*\b(pdf|report|file|document|briefing|summary)\b/i.test(lower);
+
+  const hasAnalyticalIntent =
+    /\b(analysis|report|investigat(e|ion|ing)|impact|reasons?|outages?|downtimes?|root\s*cause|post-?mortem|audit|assessment|comprehensive|deep\s*dive|trade-?offs?|benchmark)\b/i.test(lower);
+
+  // 1. Coding check first if explicit programming keywords exist
+  const codingScore = CODING_KEYWORDS.filter(k => lower.includes(k)).length;
+  if (codingScore >= 2 || lower.includes('```') || (codingScore >= 1 && /\b(script|function|code|debug|refactor)\b/i.test(lower))) {
+    return 'coding';
+  }
+
+  // 2. If an analytical or investigative document/report is requested,
+  // classify as 'reasoning' so the model spends deliberate thinking effort BEFORE generating the document!
+  if (isDocumentOrFileAction && hasAnalyticalIntent) {
+    return 'reasoning';
+  }
+
+  // 3. Pure utility / file writing / real-time search action
+  if (isDocumentOrFileAction) {
     return 'tool_use';
   }
 
-  // Quick queries — short, simple questions
+  // 4. Pure analytical / reasoning questions
+  const reasoningScore = REASONING_KEYWORDS.filter(k => lower.includes(k)).length;
+  if (reasoningScore >= 2 || hasAnalyticalIntent) {
+    return 'reasoning';
+  }
+
+  // 5. Quick queries — short, simple questions
   if (wordCount <= 12 && !lower.includes('```') && !lower.includes('code')) {
-    // Check if it's NOT a creative/reasoning request first
     const isSimple = !REASONING_KEYWORDS.some(k => lower.includes(k))
       && !CREATIVE_KEYWORDS.some(k => lower.includes(k));
     if (isSimple) return 'quick';
   }
 
-  // Coding — code blocks, file extensions, programming keywords
-  const codingScore = CODING_KEYWORDS.filter(k => lower.includes(k)).length;
-  if (codingScore >= 2 || lower.includes('```')) return 'coding';
-
-  // Reasoning — analytical/comparison keywords
-  const reasoningScore = REASONING_KEYWORDS.filter(k => lower.includes(k)).length;
-  if (reasoningScore >= 2) return 'reasoning';
-
-  // Creative — writing/composition keywords
+  // 6. Creative — writing/composition keywords
   const creativeScore = CREATIVE_KEYWORDS.filter(k => lower.includes(k)).length;
   if (creativeScore >= 1) return 'creative';
 
@@ -264,17 +280,36 @@ export class SmartRouter implements LLMProvider {
     this.gate = new RateLimitGate();
   }
 
+  /**
+   * Automatically resolves reasoning effort based on task type if not explicitly set.
+   * - 'reasoning' tasks (deep analysis, investigative reports): 'high'
+   * - 'coding' tasks (architecture, debugging): 'medium'
+   * - 'quick' or simple 'tool_use': 'low' or default
+   */
+  private resolveEffectiveOptions(taskType: TaskType, options?: LLMOptions): LLMOptions {
+    const opts: LLMOptions = { ...options };
+    if (!opts.reasoningEffort) {
+      if (taskType === 'reasoning') {
+        opts.reasoningEffort = 'high';
+      } else if (taskType === 'coding') {
+        opts.reasoningEffort = 'medium';
+      }
+    }
+    return opts;
+  }
+
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
     const userMessage = this.extractUserMessage(messages);
     const taskType = options?.taskHint ?? classifyTask(userMessage, messages);
+    const effectiveOptions = this.resolveEffectiveOptions(taskType, options);
     const ordered = this.rankProviders(taskType);
 
     let lastError: Error | null = null;
 
     for (const profile of ordered) {
       try {
-        console.log(`[router] ${taskType} → trying ${profile.providerId}/${profile.modelId}`);
-        const result = await profile.provider.chat(messages, options);
+        console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → trying ${profile.providerId}/${profile.modelId}`);
+        const result = await profile.provider.chat(messages, effectiveOptions);
         this.gate.recordUsage(profile, estimateTokens(result));
         this.lastUsedProvider = { providerId: profile.providerId, modelId: profile.modelId };
         console.log(`[router] ✓ ${profile.providerId}/${profile.modelId} responded (${taskType})`);
@@ -299,14 +334,15 @@ export class SmartRouter implements LLMProvider {
   async *stream(messages: Message[], options?: LLMOptions): AsyncGenerator<string> {
     const userMessage = this.extractUserMessage(messages);
     const taskType = options?.taskHint ?? classifyTask(userMessage, messages);
+    const effectiveOptions = this.resolveEffectiveOptions(taskType, options);
     const ordered = this.rankProviders(taskType);
 
     let lastError: Error | null = null;
 
     for (const profile of ordered) {
       try {
-        console.log(`[router] ${taskType} → streaming via ${profile.providerId}/${profile.modelId}`);
-        const gen = profile.provider.stream(messages, options);
+        console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → streaming via ${profile.providerId}/${profile.modelId}`);
+        const gen = profile.provider.stream(messages, effectiveOptions);
 
         // Validate first chunk before committing to this provider
         const first = await gen.next();

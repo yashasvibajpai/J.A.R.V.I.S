@@ -16,26 +16,50 @@ export class OpenAIAdapter implements LLMProvider {
   }
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
-    const response = await this.client.chat.completions.create({
+    const params: any = {
       model: this.model,
       messages: messages.map((m) => ({ role: m.role, content: m.content } as ChatCompletionMessageParam)),
       temperature: options?.temperature ?? 0.7,
       max_tokens: options?.maxTokens ?? 4096,
       ...(options?.stopSequences ? { stop: options.stopSequences } : {}),
-    });
+      ...(options?.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
+    };
 
-    return response.choices[0]?.message?.content ?? '';
+    try {
+      const response = await this.client.chat.completions.create(params);
+      return response.choices[0]?.message?.content ?? '';
+    } catch (err: any) {
+      if (options?.reasoningEffort && (err?.message?.includes('reasoning_effort') || err?.status === 400)) {
+        delete params.reasoning_effort;
+        const retryResponse = await this.client.chat.completions.create(params);
+        return retryResponse.choices[0]?.message?.content ?? '';
+      }
+      throw err;
+    }
   }
 
   async *stream(messages: Message[], options?: LLMOptions): AsyncGenerator<string> {
-    const stream = await this.client.chat.completions.create({
+    const params: any = {
       model: this.model,
       messages: messages.map((m) => ({ role: m.role, content: m.content } as ChatCompletionMessageParam)),
       temperature: options?.temperature ?? 0.7,
       max_tokens: options?.maxTokens ?? 4096,
       stream: true,
       ...(options?.stopSequences ? { stop: options.stopSequences } : {}),
-    });
+      ...(options?.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
+    };
+
+    let stream: any;
+    try {
+      stream = await this.client.chat.completions.create(params);
+    } catch (err: any) {
+      if (options?.reasoningEffort && (err?.message?.includes('reasoning_effort') || err?.status === 400)) {
+        delete params.reasoning_effort;
+        stream = await this.client.chat.completions.create(params);
+      } else {
+        throw err;
+      }
+    }
 
     for await (const chunk of stream) {
       const delta = chunk.choices[0]?.delta?.content;

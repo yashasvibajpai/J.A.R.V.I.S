@@ -14,12 +14,19 @@ export interface Message {
 /** Task categories used by the SmartRouter for intelligent provider selection */
 export type TaskType = 'general' | 'coding' | 'reasoning' | 'creative' | 'quick' | 'tool_use' | 'embedding';
 
+/** Reasoning effort levels supported by thinking/reasoning models */
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
 export interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
   stopSequences?: string[];
   /** Hint from the pipeline about what kind of task this is — used by SmartRouter for routing */
   taskHint?: TaskType;
+  /** Effort level allocated to internal reasoning / chain-of-thought tokens */
+  reasoningEffort?: ReasoningEffort;
+  /** Explicit thinking token budget if supported (e.g. Gemini / Claude) */
+  thinkingBudget?: number;
 }
 
 export interface LLMCapabilities {
