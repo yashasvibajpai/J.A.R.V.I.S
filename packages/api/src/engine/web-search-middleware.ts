@@ -6,7 +6,30 @@ const REALTIME_KEYWORDS = [
   'latest', 'news', 'today', 'current', 'update', 'breaking',
   'recent', 'happening', 'who is', 'weather', 'stock', 'price',
   'search the web', 'look up', 'google', 'browse', 'war', 'conflict',
+  'outages', 'outage', 'downtime', 'last 7 days', 'last week', 'yesterday',
+  'incident', 'breach', 'blackout',
 ];
+
+/**
+ * Extracts clean search keywords from a conversational prompt by stripping
+ * command verbs, document generation instructions, and meta requirements.
+ */
+export function extractSearchKeywords(prompt: string): string {
+  let cleaned = prompt
+    // Strip leading action / document compilation requests
+    .replace(/\b(create|generate|compile|write|make|give me|show me|draft|produce)\s+(a\s+)?(brief\s+)?(pdf\s+)?(report|document|summary|overview|brief|article|essay)\s+(on|about|for|regarding)?\b/gi, '')
+    // Strip save-as directives
+    .replace(/\b(save\s+(as|to)\s+.*|\.pdf|\.md|\.txt)\b/gi, '')
+    // Strip meta requirements / instructions
+    .replace(/\b(along\s*with|alongwith|including|as well as|covering|detailing|with details on)\b.*/gi, '')
+    // Strip punctuation
+    .replace(/[,\.?!;:"]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // If cleaning resulted in too short a phrase (< 3 chars), fallback to prompt
+  return cleaned.length >= 3 ? cleaned : prompt;
+}
 
 /**
  * Web Search Middleware (Pre-LLM)
@@ -30,8 +53,15 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
 
     if (isRealTimeQuery) {
       try {
-        console.log(`[web-search] Searching live web for: "${message}"`);
-        const results = await searchService.search(message, 4);
+        const searchQuery = extractSearchKeywords(message);
+        console.log(`[web-search] Searching live web for: "${searchQuery}" (cleaned from: "${message.substring(0, 50)}...")`);
+        let results = await searchService.search(searchQuery, 4);
+
+        // Fallback to original message if cleaned query returned 0 results
+        if (results.length === 0 && searchQuery !== message) {
+          console.log(`[web-search] Retrying search with raw query...`);
+          results = await searchService.search(message, 4);
+        }
 
         if (results.length > 0) {
           const dateStr = new Date().toLocaleDateString('en-US', {

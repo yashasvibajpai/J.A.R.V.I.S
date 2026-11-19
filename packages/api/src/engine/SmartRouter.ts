@@ -36,8 +36,9 @@ const TOOL_USE_KEYWORDS = [
   'latest on', 'latest news', 'what is the latest', "what's the latest",
   'breaking news', 'current events', 'today in', 'news on', 'weather in',
   'stock price', 'price of',
-  'create pdf', 'generate pdf', 'compile pdf', 'save pdf', '.pdf',
-  'create file', 'save to file', 'save as', 'write to file',
+  'create pdf', 'generate pdf', 'compile pdf', 'save pdf', '.pdf', 'pdf report', 'pdf',
+  'create file', 'save to file', 'save as', 'write to file', 'outage', 'outages',
+  'downtime', 'incident report', 'briefing',
 ];
 
 /**
@@ -48,8 +49,14 @@ export function classifyTask(userMessage: string, _history?: Message[]): TaskTyp
   const lower = userMessage.toLowerCase();
   const wordCount = userMessage.trim().split(/\s+/).length;
 
-  // Tool use — explicit action or real-time information requests (check before length heuristics)
-  if (TOOL_USE_KEYWORDS.some(k => lower.includes(k))) return 'tool_use';
+  // Tool use — explicit action, document/PDF generation, or real-time information requests
+  if (
+    TOOL_USE_KEYWORDS.some(k => lower.includes(k)) ||
+    /\b(create|generate|compile|save|make|produce)\b.*\b(pdf|report|file|document|briefing|summary)\b/i.test(lower) ||
+    /\b(outages?|downtimes?)\b/i.test(lower)
+  ) {
+    return 'tool_use';
+  }
 
   // Quick queries — short, simple questions
   if (wordCount <= 12 && !lower.includes('```') && !lower.includes('code')) {

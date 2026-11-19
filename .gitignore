@@ -18,5 +18,9 @@ packages/web/.next/
 *.db-wal
 *.db-shm
 
+# Generated Documents
+documents/
+packages/api/documents/
+
 # Mac
 .DS_Store
