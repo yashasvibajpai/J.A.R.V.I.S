@@ -2,7 +2,7 @@
  * J.A.R.V.I.S — Terminal UI & Interaction Engine
  *
  * Replicates signature Claude Code CLI features:
- * 1. Whimsical Marvel J.A.R.V.I.S. & Vision Spinner Verbs & Context Tips
+ * 1. Animated Agent Spinner Verbs & Context Tips
  * 2. Ephemeral Side Questions (/btw) with isolated floating overlay
  * 3. Interactive Tabbed Question Forms (AskUserQuestion wizard)
  */
@@ -32,7 +32,7 @@ export const c = {
   bgCyan: '\x1b[46m\x1b[30m',
 };
 
-// ─── Marvel J.A.R.V.I.S. & Vision Spinner Verbs ──────────────────────────────
+// ─── Agent Spinner Verbs ──────────────────────────────────────────────────────
 
 export const JARVIS_SPINNER_VERBS = [
   'Calibrating repulsor telemetry...',
