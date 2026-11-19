@@ -99,11 +99,15 @@ export class WebSearchService {
 
       // Filter out generic landing pages (e.g. /latest with no article slug)
       const isGenericHub = (r: SearchResult) =>
-        /(\/latest\/?$|\/news\/?$|\/trending\/?$)/i.test(r.url) ||
+        /(\/latest\/?$|\/news\/?$|\/trending\/?$|\/newsroom\/?$)/i.test(r.url) ||
         (r.snippet.length < 80 && /track.*in real time|see the latest/i.test(r.snippet));
 
-      // 1. Add verified breaking news headlines first (they carry fresh timestamps)
-      for (const r of newsResults) {
+      // 1. Substantive DuckDuckGo articles come FIRST: they provide full multi-sentence
+      //    paragraph snippets explaining the actual events, who resigned, and why.
+      const specificDdg = ddgResults.filter((r) => !isGenericHub(r));
+      const genericDdg = ddgResults.filter((r) => isGenericHub(r));
+
+      for (const r of specificDdg.slice(0, 4)) {
         const normTitle = r.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
         if (!seenTitles.has(normTitle)) {
           seenTitles.add(normTitle);
@@ -111,15 +115,25 @@ export class WebSearchService {
         }
       }
 
-      // 2. Add detailed DDG article snippets (putting substantive articles above generic landing pages)
-      const specificDdg = ddgResults.filter((r) => !isGenericHub(r));
-      const genericDdg = ddgResults.filter((r) => isGenericHub(r));
-
-      for (const r of [...specificDdg, ...genericDdg]) {
+      // 2. Add real-time timestamped headlines from Google News RSS for fresh breaking developments
+      for (const r of newsResults) {
         const normTitle = r.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
         if (!seenTitles.has(normTitle)) {
           seenTitles.add(normTitle);
           combined.push(r);
+        }
+        if (combined.length >= targetCount) break;
+      }
+
+      // 3. Fill remaining slots with generic DDG results if needed
+      if (combined.length < targetCount) {
+        for (const r of genericDdg) {
+          const normTitle = r.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
+          if (!seenTitles.has(normTitle)) {
+            seenTitles.add(normTitle);
+            combined.push(r);
+          }
+          if (combined.length >= targetCount) break;
         }
       }
 

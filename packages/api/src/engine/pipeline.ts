@@ -42,6 +42,33 @@ export type Middleware = (
   next: () => Promise<void>
 ) => Promise<void>;
 
+/**
+ * Consolidates multiple disparate `system` messages into a single root system message.
+ * Required for compatibility with model providers (Google Gemini, Groq, Ollama, Anthropic)
+ * whose OpenAI translation layers drop or mishandle non-contiguous or multiple system messages.
+ */
+export function normalizeMessages(messages: Message[]): Message[] {
+  const systemParts: string[] = [];
+  const nonSystem: Message[] = [];
+
+  for (const m of messages) {
+    if (m.role === 'system') {
+      if (m.content && m.content.trim()) {
+        systemParts.push(m.content.trim());
+      }
+    } else {
+      nonSystem.push(m);
+    }
+  }
+
+  if (systemParts.length === 0) return nonSystem;
+
+  return [
+    { role: 'system', content: systemParts.join('\n\n') },
+    ...nonSystem,
+  ];
+}
+
 // ─── Pipeline ────────────────────────────────────────────────────────────────
 
 /**
@@ -103,6 +130,7 @@ export class Pipeline {
     };
 
     await executeNext();
+    ctx.messages = normalizeMessages(ctx.messages);
     return ctx;
   }
 
@@ -133,6 +161,7 @@ export class Pipeline {
     };
 
     await executeNext();
+    ctx.messages = normalizeMessages(ctx.messages);
     return ctx;
   }
 

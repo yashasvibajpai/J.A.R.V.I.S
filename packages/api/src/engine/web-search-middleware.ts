@@ -127,7 +127,10 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
             ...results.map((r) => `${r.title} (${r.source || 'Web'})`),
           ];
 
-          console.log(`[web-search] ✓ Injected ${results.length} live web results into context`);
+          console.log(`[web-search] ✓ Injected ${results.length} live web results into context:`);
+          for (const r of results) {
+            console.log(`  -> [${r.source || 'Web'}] ${r.title}`);
+          }
         } else {
           console.log(`[web-search] No web results found for: "${message}"`);
         }

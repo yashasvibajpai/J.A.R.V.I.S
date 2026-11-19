@@ -1,4 +1,5 @@
 import type { LLMProvider, LLMOptions, LLMCapabilities, Message } from '@jarvis/shared';
+import { normalizeMessages } from './pipeline.js';
 
 // ─── Task Classification ─────────────────────────────────────────────────────
 
@@ -299,8 +300,9 @@ export class SmartRouter implements LLMProvider {
   }
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
-    const userMessage = this.extractUserMessage(messages);
-    const taskType = options?.taskHint ?? classifyTask(userMessage, messages);
+    const normalized = normalizeMessages(messages);
+    const userMessage = this.extractUserMessage(normalized);
+    const taskType = options?.taskHint ?? classifyTask(userMessage, normalized);
     const effectiveOptions = this.resolveEffectiveOptions(taskType, options);
     const ordered = this.rankProviders(taskType);
 
@@ -309,7 +311,7 @@ export class SmartRouter implements LLMProvider {
     for (const profile of ordered) {
       try {
         console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → trying ${profile.providerId}/${profile.modelId}`);
-        const result = await profile.provider.chat(messages, effectiveOptions);
+        const result = await profile.provider.chat(normalized, effectiveOptions);
         if (!result || !result.trim()) {
           throw new Error(`Provider ${profile.providerId}/${profile.modelId} returned an empty response`);
         }
@@ -335,8 +337,9 @@ export class SmartRouter implements LLMProvider {
   }
 
   async *stream(messages: Message[], options?: LLMOptions): AsyncGenerator<string> {
-    const userMessage = this.extractUserMessage(messages);
-    const taskType = options?.taskHint ?? classifyTask(userMessage, messages);
+    const normalized = normalizeMessages(messages);
+    const userMessage = this.extractUserMessage(normalized);
+    const taskType = options?.taskHint ?? classifyTask(userMessage, normalized);
     const effectiveOptions = this.resolveEffectiveOptions(taskType, options);
     const ordered = this.rankProviders(taskType);
 
@@ -345,7 +348,7 @@ export class SmartRouter implements LLMProvider {
     for (const profile of ordered) {
       try {
         console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → streaming via ${profile.providerId}/${profile.modelId}`);
-        const gen = profile.provider.stream(messages, effectiveOptions);
+        const gen = profile.provider.stream(normalized, effectiveOptions);
 
         // Validate first chunk before committing to this provider
         const first = await gen.next();
