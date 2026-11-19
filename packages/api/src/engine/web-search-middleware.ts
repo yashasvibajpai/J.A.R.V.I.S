@@ -72,7 +72,14 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
       try {
         const searchQuery = extractSearchKeywords(message);
         console.log(`[web-search] Searching live web for: "${searchQuery}" (cleaned from: "${message.substring(0, 50)}...")`);
-        let results = await searchService.search(searchQuery, 4);
+
+        // Concurrently fetch web search results and live stock quotes (if applicable)
+        const [searchResults, stockData] = await Promise.all([
+          searchService.search(searchQuery, 4),
+          searchService.getLiveStockData(message),
+        ]);
+
+        let results = searchResults;
 
         // Fallback to original message if cleaned query returned 0 results
         if (results.length === 0 && searchQuery !== message) {
@@ -80,7 +87,11 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
           results = await searchService.search(message, 4);
         }
 
-        if (results.length > 0) {
+        if (stockData) {
+          console.log(`[web-search] ✓ Injected live market ticker data into context`);
+        }
+
+        if (results.length > 0 || stockData) {
           const now = new Date();
           const dateStr = now.toLocaleDateString('en-US', {
             timeZone: 'Asia/Kolkata',
@@ -88,15 +99,27 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
           });
           const isoDate = now.toISOString().split('T')[0];
 
-          let searchBlock = `## Real-Time Live Web Results (${dateStr})\n`;
-          searchBlock += `TODAY'S DATE IS ${isoDate}. The current year is ${now.getFullYear()}.\n`;
-          searchBlock += `The following live web search results were freshly retrieved for this query. Use ONLY these verified, up-to-date facts to provide an accurate answer grounded in the CURRENT date shown above. Do NOT use training data from past years — only the live results below.\n`;
-          searchBlock += `For financial, market, or macroeconomic questions, deliver factual news synthesis and market trend evaluation for research/educational purposes. Cite sources naturally.\n\n`;
+          let searchBlock = `## Real-Time Live Grounding & Market Data (${dateStr})\n`;
+          searchBlock += `TODAY'S DATE IS ${isoDate}. The current year is ${now.getFullYear()}.\n\n`;
 
-          for (const res of results) {
-            searchBlock += `- [${res.source || 'Web'}] **${res.title}**\n`;
-            searchBlock += `  ${res.snippet}\n`;
-            searchBlock += `  Link: ${res.url}\n\n`;
+          if (stockData) {
+            searchBlock += `${stockData}\n`;
+            searchBlock += `CRITICAL INSTRUCTIONS FOR STOCK / FINANCIAL REPORTING:\n`;
+            searchBlock += `- The market data above is REAL-TIME live market data for this week in November ${now.getFullYear()}.\n`;
+            searchBlock += `- You MUST reference and analyze these exact tickers, prices, and 5-day percentage trends in your report.\n`;
+            searchBlock += `- Under NO circumstances generate "Hypothetical Week" or dates from 2024/2025. Today is in ${now.getFullYear()}.\n\n`;
+          }
+
+          if (results.length > 0) {
+            searchBlock += `### Verified Live Web News & Analyses\n`;
+            searchBlock += `Use these verified, up-to-date facts to provide an accurate answer grounded in the CURRENT date shown above. Do NOT use training data from past years — only the live results below.\n`;
+            searchBlock += `For financial, market, or macroeconomic questions, deliver factual news synthesis and market trend evaluation for research/educational purposes. Cite sources naturally.\n\n`;
+
+            for (const res of results) {
+              searchBlock += `- [${res.source || 'Web'}] **${res.title}**\n`;
+              searchBlock += `  ${res.snippet}\n`;
+              searchBlock += `  Link: ${res.url}\n\n`;
+            }
           }
 
           // Inject into system prompt
