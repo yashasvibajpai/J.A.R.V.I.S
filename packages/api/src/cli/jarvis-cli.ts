@@ -14,7 +14,7 @@
  */
 
 import readline from 'readline/promises';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync } from 'fs';
 import { exec } from 'child_process';
@@ -49,6 +49,8 @@ import { SQLiteReminderStore } from '../stores/SQLiteReminderStore.js';
 import { SQLiteCaptureStore } from '../stores/SQLiteCaptureStore.js';
 import { SQLiteSessionStore } from '../stores/SQLiteSessionStore.js';
 import { LanceVectorStore } from '../stores/LanceVectorStore.js';
+import { SQLiteResearchStore } from '../stores/SQLiteResearchStore.js';
+import { ResearchEngine } from '../engine/ResearchEngine.js';
 import type { Message } from '@jarvis/shared';
 
 import {
@@ -65,7 +67,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── CLI Core Setup ───────────────────────────────────────────────────────────
 
-async function initJarvisSystem() {
+export async function initJarvisSystem() {
   const DATA_DIR = resolve(__dirname, '../../../data');
   const ALT_DATA_DIR = resolve(__dirname, '../../data');
   const dataDir = existsSync(DATA_DIR) ? DATA_DIR : ALT_DATA_DIR;
@@ -90,6 +92,17 @@ async function initJarvisSystem() {
 
   const webSearch = new WebSearchService();
   const fileService = new FileService();
+
+  const researchStore = new SQLiteResearchStore(resolve(dataDir, 'research.db'));
+  const researchEngine = new ResearchEngine(
+    researchStore,
+    router,
+    webSearch,
+    fileService,
+    { logFile: resolve(dataDir, 'research.log') }
+  );
+  // Auto-start tick loop to process background work / resume existing missions
+  researchEngine.start();
 
   // Assemble CLI Message Pipeline
   const pipeline = new Pipeline()
@@ -122,6 +135,8 @@ async function initJarvisSystem() {
     webSearch,
     vectorStore,
     sessionStore,
+    researchStore,
+    researchEngine,
   };
 }
 
@@ -278,6 +293,25 @@ async function runInteractiveRepl() {
   let history: Message[] = [];
   let activeReasoningEffort: 'low' | 'medium' | 'high' | undefined = undefined;
 
+  // Background Research Mission Completion Listener
+  sys.researchEngine.on('completed', (resSession) => {
+    process.stdout.write(
+      `\n\n${c.green}${c.bold}🔔 J.A.R.V.I.S. Research Mission Complete:${c.reset} "${resSession.topic}"\n` +
+      `  • Markdown Report: ${c.cyan}${resSession.reportPath || 'Saved'}${c.reset}\n` +
+      (resSession.pdfPath ? `  • Compiled PDF:    ${c.cyan}${resSession.pdfPath}${c.reset}\n` : '') +
+      `  • Findings:        ${c.green}${resSession.findings?.length || 0} facts verified & cross-referenced${c.reset}\n\n` +
+      `${c.cyan}${c.bold}jarvis${c.reset} ${c.gray}❯${c.reset} `
+    );
+  });
+
+  sys.researchEngine.on('failed', ({ session: resSession, error }) => {
+    process.stdout.write(
+      `\n\n${c.red}${c.bold}⚠️ J.A.R.V.I.S. Research Mission Failed:${c.reset} "${resSession.topic}"\n` +
+      `  • Error: ${c.yellow}${error}${c.reset}\n\n` +
+      `${c.cyan}${c.bold}jarvis${c.reset} ${c.gray}❯${c.reset} `
+    );
+  });
+
   while (true) {
     let input = '';
     try {
@@ -432,6 +466,13 @@ async function handleSlashCommand(
       console.log(`${c.green}✓ Session history cleared.${c.reset}\n`);
       return 'CLEARED';
 
+    // ── Long-Running Autonomous Background Research Engine ─────────────────
+    case '/research':
+    case '/bg': {
+      await handleResearchCommand(rest, sys.researchEngine);
+      break;
+    }
+
     // ── Reasoning Engine Effort Control ──────────────────────────────────────
     case '/reason': {
       const mode = rest.toLowerCase();
@@ -530,6 +571,9 @@ async function handleSlashCommand(
     case '/help':
       console.log(`
 ${c.bold}Signature Agent Capabilities:${c.reset}
+  ${c.brightGreen}/research <topic>${c.reset}          Dispatch long-running autonomous research mission to background
+  ${c.brightGreen}/research status [id]${c.reset}      Inspect active research progress, steps, & verified findings
+  ${c.brightGreen}/research list${c.reset}             List all recent background research sessions
   ${c.magenta}/reason [low|med|high|auto]${c.reset} Adjust reasoning effort & thinking token depth
   ${c.magenta}/deep <query>${c.reset}              Run query with deep analytical investigation and maximum reasoning
   ${c.magenta}/btw <question>${c.reset}           Ephemeral side question in a floating card (leaves main context clean)
@@ -546,6 +590,8 @@ ${c.bold}Signature Agent Capabilities:${c.reset}
   ${c.yellow}/exit${c.reset}                     Exit JARVIS CLI
 
 ${c.bold}Natural Language Agent Commands:${c.reset}
+  • Ask for autonomous background research:
+    ${c.cyan}"/research Comprehensive analysis of solid-state battery commercialization"${c.reset}
   • Ask for deep investigations:
     ${c.cyan}"/deep Create a comprehensive outage report with root causes and blast radiuses"${c.reset}
   • Ask for architectural decisions:
@@ -562,6 +608,7 @@ ${c.bold}Natural Language Agent Commands:${c.reset}
       const memoryCount = await sys.memoryStore.count();
       const profile = await sys.profileStore.getProfile('default');
       const vectorCount = await sys.vectorStore.count();
+      const activeResearch = await sys.researchStore.getActiveSession();
       const currentReasoning = reasoningControls?.getReasoning()?.toUpperCase() ?? 'Adaptive (SmartRouter)';
       console.log(`  • Memories in SQLite:  ${c.cyan}${memoryCount}${c.reset}`);
       console.log(`  • Obsidian LanceDB:    ${c.cyan}${vectorCount} chunks${c.reset}`);
@@ -569,6 +616,10 @@ ${c.bold}Natural Language Agent Commands:${c.reset}
       console.log(`  • User Profile:        ${c.cyan}${profile?.name || 'User'}${c.reset} (${roleStr})`);
       console.log(`  • Workspace Root:      ${c.cyan}${process.cwd()}${c.reset}`);
       console.log(`  • Reasoning Effort:    ${c.cyan}${currentReasoning}${c.reset}`);
+      const researchStr = activeResearch
+        ? `${c.green}Active${c.reset} (${activeResearch.progress}% - ${activeResearch.currentStepTitle || 'Running'})`
+        : `${c.dim}Idle (Ready for /research)${c.reset}`;
+      console.log(`  • Background Research: ${researchStr}`);
       console.log(`  • Core Architecture:  ${c.cyan}Autonomous Agentic Pipeline v2.5.0${c.reset}\n`);
       break;
     }
@@ -688,6 +739,130 @@ ${c.bold}Natural Language Agent Commands:${c.reset}
   }
 }
 
+// ─── Research Command Handler ─────────────────────────────────────────────────
+
+async function handleResearchCommand(
+  rawInput: string,
+  engine: ResearchEngine
+): Promise<void> {
+  const parts = rawInput.trim().split(' ');
+  const subCmd = parts[0]?.toLowerCase();
+  const rest = parts.slice(1).join(' ').trim();
+
+  if (!rawInput.trim() || subCmd === 'list') {
+    const missions = await engine.listMissions(10);
+    if (missions.length === 0) {
+      console.log(`\n${c.yellow}No research missions found.${c.reset}`);
+      console.log(`Launch one with: ${c.cyan}/research <topic>${c.reset}\n`);
+      return;
+    }
+    console.log(`\n${c.bold}Autonomous Research Missions:${c.reset}`);
+    for (const m of missions) {
+      const statusColor = m.status === 'completed' ? c.green : m.status === 'in_progress' ? c.cyan : m.status === 'paused' ? c.yellow : c.red;
+      const bar = renderProgressBar(m.progress);
+      console.log(`  ${c.dim}${m.id}${c.reset} [${statusColor}${m.status.toUpperCase()}${c.reset}] ${bar} ${c.bold}${m.topic.slice(0, 45)}${c.reset}`);
+      if (m.currentStepTitle && m.status === 'in_progress') {
+        console.log(`    ${c.dim}↳ Active: ${m.currentStepTitle}${c.reset}`);
+      }
+      if (m.reportPath && m.status === 'completed') {
+        console.log(`    ${c.dim}↳ Report: ${m.reportPath}${c.reset}`);
+      }
+    }
+    console.log();
+    return;
+  }
+
+  if (subCmd === 'status') {
+    const targetId = rest || undefined;
+    const { session, steps, activeStep } = await engine.getStatus(targetId);
+    if (!session) {
+      console.log(`\n${c.yellow}No active or matching research session found.${c.reset}\n`);
+      return;
+    }
+
+    const statusColor = session.status === 'completed' ? c.green : session.status === 'in_progress' ? c.cyan : c.yellow;
+    console.log(`\n${c.bold}Mission Telemetry:${c.reset} ${c.dim}${session.id}${c.reset}`);
+    console.log(`  • Topic:    ${c.bold}${session.topic}${c.reset}`);
+    console.log(`  • State:    [${statusColor}${session.status.toUpperCase()}${c.reset}] ${renderProgressBar(session.progress)}`);
+    console.log(`  • Findings: ${c.cyan}${session.findings?.length || 0} facts verified${c.reset}`);
+    if (activeStep) {
+      console.log(`  • Current:  ${c.brightCyan}Step ${activeStep.stepNumber}/${session.totalSteps}:${c.reset} ${activeStep.title}`);
+    }
+    if (session.reportPath) {
+      console.log(`  • Report:   ${c.green}${session.reportPath}${c.reset}`);
+    }
+    if (session.pdfPath) {
+      console.log(`  • PDF:      ${c.green}${session.pdfPath}${c.reset}`);
+    }
+
+    if (steps.length > 0) {
+      console.log(`\n  ${c.dim}Execution Steps:${c.reset}`);
+      for (const s of steps) {
+        const icon = s.status === 'completed' ? `${c.green}✓${c.reset}` : s.status === 'running' ? `${c.cyan}⠋${c.reset}` : s.status === 'failed' ? `${c.red}✗${c.reset}` : `${c.gray}○${c.reset}`;
+        console.log(`    ${icon} ${s.stepNumber}. ${s.title}`);
+      }
+    }
+    console.log();
+    return;
+  }
+
+  if (subCmd === 'cancel') {
+    if (!rest) {
+      console.log(`${c.yellow}Usage:${c.reset} /research cancel <mission-id>\n`);
+      return;
+    }
+    const ok = await engine.cancelMission(rest);
+    if (ok) {
+      console.log(`${c.green}✓ Cancelled research mission ${rest}.${c.reset}\n`);
+    } else {
+      console.log(`${c.red}Mission ${rest} not found or already completed.${c.reset}\n`);
+    }
+    return;
+  }
+
+  if (subCmd === 'pause') {
+    if (!rest) {
+      console.log(`${c.yellow}Usage:${c.reset} /research pause <mission-id>\n`);
+      return;
+    }
+    const ok = await engine.pauseMission(rest);
+    console.log(ok ? `${c.yellow}⏸ Paused mission ${rest}.${c.reset}\n` : `${c.red}Could not pause ${rest}.${c.reset}\n`);
+    return;
+  }
+
+  if (subCmd === 'resume') {
+    if (!rest) {
+      console.log(`${c.yellow}Usage:${c.reset} /research resume <mission-id>\n`);
+      return;
+    }
+    const ok = await engine.resumeMission(rest);
+    console.log(ok ? `${c.green}▶ Resumed mission ${rest}.${c.reset}\n` : `${c.red}Could not resume ${rest}.${c.reset}\n`);
+    return;
+  }
+
+  // Otherwise treat entire rawInput as research topic
+  const session = await engine.startMission(rawInput.trim());
+
+  console.log(`\n${c.cyan}┌─────────────────────────────────────────────────────────────┐${c.reset}`);
+  console.log(`${c.cyan}│${c.reset} ${c.bold}${c.brightCyan}🚀 Autonomous Research Matrix Dispatched${c.reset}                   ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}                                                             ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Mission ID:  ${c.brightYellow}${session.id.padEnd(42)}${c.reset} ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Topic:       ${c.bold}"${session.topic.slice(0, 39).padEnd(39)}"${c.reset} ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Heartbeat:   ${c.green}TickEngine active (3.5s budget loop)${c.reset}          ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Providers:   ${c.dim}Free tier only (Gemini / Groq / Mistral)${c.reset}      ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Deliverable: ${c.cyan}~/Downloads (Markdown + PDF)${c.reset}                 ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}                                                             ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  ${c.dim}JARVIS remains unblocked. Chat as normal or run /research status.${c.reset} ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}└─────────────────────────────────────────────────────────────┘${c.reset}\n`);
+}
+
+function renderProgressBar(pct: number): string {
+  const width = 10;
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+  const empty = Math.max(0, width - filled);
+  return `${c.cyan}[${'█'.repeat(filled)}${'░'.repeat(empty)}] ${pct}%${c.reset}`;
+}
+
 // ─── One-Shot Execution Mode ──────────────────────────────────────────────────
 
 async function runOneShot(prompt: string) {
@@ -731,13 +906,30 @@ async function runOneShot(prompt: string) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length > 0) {
-    await runOneShot(args.join(' '));
+    const fullInput = args.join(' ').trim();
+    if (fullInput.startsWith('/')) {
+      const sys = await initJarvisSystem();
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      await handleSlashCommand(fullInput, sys, rl, []);
+      rl.close();
+      process.exit(0);
+    }
+    await runOneShot(fullInput);
   } else {
     await runInteractiveRepl();
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const isDirectRun = Boolean(
+  process.argv[1] &&
+  (process.argv[1].endsWith('jarvis-cli.ts') ||
+   process.argv[1].endsWith('jarvis-cli.js') ||
+   basename(process.argv[1]) === 'jarvis')
+);
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
