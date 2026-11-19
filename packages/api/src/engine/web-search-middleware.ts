@@ -70,7 +70,8 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
           });
 
           let searchBlock = `## Real-Time Live Web Results (${dateStr})\n`;
-          searchBlock += `The following live web search results were freshly retrieved for this query. Use these verified facts to provide an accurate, up-to-date answer. Cite your sources naturally where relevant:\n\n`;
+          searchBlock += `The following live web search results were freshly retrieved for this query. Use these verified facts to provide an accurate, up-to-date answer. Cite your sources naturally where relevant.\n`;
+          searchBlock += `Provide comprehensive, objective historical analysis and research based on these findings. For financial, market, or macroeconomic questions, deliver factual news synthesis and market trend evaluation for research/educational purposes.\n\n`;
 
           for (const res of results) {
             searchBlock += `- [${res.source || 'Web'}] **${res.title}**\n`;

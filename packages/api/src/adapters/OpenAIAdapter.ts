@@ -16,34 +16,52 @@ export class OpenAIAdapter implements LLMProvider {
   }
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
+    const defaultMaxTokens = options?.reasoningEffort ? 8192 : 4096;
     const params: any = {
       model: this.model,
       messages: messages.map((m) => ({ role: m.role, content: m.content } as ChatCompletionMessageParam)),
       temperature: options?.temperature ?? 0.7,
-      max_tokens: options?.maxTokens ?? 4096,
+      max_tokens: options?.maxTokens ?? defaultMaxTokens,
       ...(options?.stopSequences ? { stop: options.stopSequences } : {}),
       ...(options?.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
     };
 
     try {
       const response = await this.client.chat.completions.create(params);
-      return response.choices[0]?.message?.content ?? '';
+      const choice = response.choices?.[0];
+      const content = choice?.message?.content;
+      const reasoning = (choice?.message as any)?.reasoning || (choice?.message as any)?.reasoning_content;
+      if (content && content.trim()) {
+        return content;
+      } else if (reasoning && reasoning.trim()) {
+        return `<think>\n${reasoning}\n</think>\n`;
+      }
+      return content ?? '';
     } catch (err: any) {
       if (options?.reasoningEffort && (err?.message?.includes('reasoning_effort') || err?.status === 400)) {
         delete params.reasoning_effort;
         const retryResponse = await this.client.chat.completions.create(params);
-        return retryResponse.choices[0]?.message?.content ?? '';
+        const choice = retryResponse.choices?.[0];
+        const content = choice?.message?.content;
+        const reasoning = (choice?.message as any)?.reasoning || (choice?.message as any)?.reasoning_content;
+        if (content && content.trim()) {
+          return content;
+        } else if (reasoning && reasoning.trim()) {
+          return `<think>\n${reasoning}\n</think>\n`;
+        }
+        return content ?? '';
       }
       throw err;
     }
   }
 
   async *stream(messages: Message[], options?: LLMOptions): AsyncGenerator<string> {
+    const defaultMaxTokens = options?.reasoningEffort ? 8192 : 4096;
     const params: any = {
       model: this.model,
       messages: messages.map((m) => ({ role: m.role, content: m.content } as ChatCompletionMessageParam)),
       temperature: options?.temperature ?? 0.7,
-      max_tokens: options?.maxTokens ?? 4096,
+      max_tokens: options?.maxTokens ?? defaultMaxTokens,
       stream: true,
       ...(options?.stopSequences ? { stop: options.stopSequences } : {}),
       ...(options?.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
@@ -61,9 +79,31 @@ export class OpenAIAdapter implements LLMProvider {
       }
     }
 
+    let inReasoning = false;
     for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta?.content;
-      if (delta) yield delta;
+      const choice = chunk.choices?.[0];
+      const reasoning = choice?.delta?.reasoning || (choice?.delta as any)?.reasoning_content;
+      const content = choice?.delta?.content;
+
+      if (reasoning) {
+        if (!inReasoning) {
+          inReasoning = true;
+          yield '<think>\n';
+        }
+        yield reasoning;
+      }
+
+      if (content) {
+        if (inReasoning) {
+          inReasoning = false;
+          yield '\n</think>\n\n';
+        }
+        yield content;
+      }
+    }
+
+    if (inReasoning) {
+      yield '\n</think>\n\n';
     }
   }
 

@@ -189,6 +189,80 @@ function printBanner() {
   console.log(`\n${c.cyan}${VISION_ASCII}${c.reset}\n\n${c.bold}${c.brightCyan}                                    JARVIS${c.reset}\n`);
 }
 
+/**
+ * Streams LLM output to terminal with rich support for reasoning/thoughts (<think> tags).
+ * When reasoning tokens arrive, dims the output and indicates active reasoning matrix.
+ * When actual response arrives, switches to bold cyan JARVIS banner.
+ */
+async function streamResponseWithReasoning(
+  stream: AsyncGenerator<string>,
+  spinner: JarvisSpinner
+): Promise<string> {
+  let streamStarted = false;
+  let inThink = false;
+  let jarvisHeaderPrinted = false;
+  let fullResponse = '';
+
+  for await (const rawChunk of stream) {
+    if (!streamStarted) {
+      spinner.stop(true);
+      streamStarted = true;
+    }
+    fullResponse += rawChunk;
+
+    let remaining = rawChunk;
+    while (remaining.length > 0) {
+      if (!inThink) {
+        const thinkIndex = remaining.indexOf('<think>');
+        if (thinkIndex !== -1) {
+          const before = remaining.slice(0, thinkIndex);
+          if (before) {
+            if (!jarvisHeaderPrinted) {
+              process.stdout.write(`\n${c.cyan}${c.bold}JARVIS:${c.reset}\n`);
+              jarvisHeaderPrinted = true;
+            }
+            process.stdout.write(before);
+          }
+          inThink = true;
+          process.stdout.write(`\n${c.magenta}🧠 Deliberative Reasoning Matrix:${c.reset}\n${c.dim}`);
+          remaining = remaining.slice(thinkIndex + 7);
+        } else {
+          if (!jarvisHeaderPrinted) {
+            process.stdout.write(`\n${c.cyan}${c.bold}JARVIS:${c.reset}\n`);
+            jarvisHeaderPrinted = true;
+          }
+          process.stdout.write(remaining);
+          remaining = '';
+        }
+      } else {
+        const closeIndex = remaining.indexOf('</think>');
+        if (closeIndex !== -1) {
+          const thinkText = remaining.slice(0, closeIndex);
+          process.stdout.write(thinkText);
+          inThink = false;
+          process.stdout.write(`${c.reset}\n\n${c.cyan}${c.bold}JARVIS:${c.reset}\n`);
+          jarvisHeaderPrinted = true;
+          remaining = remaining.slice(closeIndex + 8);
+        } else {
+          process.stdout.write(remaining);
+          remaining = '';
+        }
+      }
+    }
+  }
+
+  if (inThink) {
+    process.stdout.write(`${c.reset}\n`);
+  }
+
+  if (!streamStarted) {
+    spinner.stop(true);
+    console.log(`\n${c.yellow}⚠️  No response received from model. Please verify provider status or try rephrasing.${c.reset}`);
+  }
+  process.stdout.write('\n\n');
+  return fullResponse;
+}
+
 // ─── Interactive REPL Loop ────────────────────────────────────────────────────
 
 async function runInteractiveRepl() {
@@ -240,7 +314,6 @@ async function runInteractiveRepl() {
       queryEffort === 'high' ? 'Engaging deep deliberative reasoning matrix...' : undefined
     );
     spinner.start();
-    let streamStarted = false;
 
     try {
       const ctx = await sys.pipeline.buildContext(activeQuery, history);
@@ -250,22 +323,8 @@ async function runInteractiveRepl() {
         ctx.messages,
         queryEffort ? { reasoningEffort: queryEffort, taskHint: queryEffort === 'high' ? 'reasoning' : undefined } : undefined
       );
-      let fullResponse = '';
 
-      for await (const chunk of stream) {
-        if (!streamStarted) {
-          spinner.stop(true);
-          streamStarted = true;
-          process.stdout.write(`\n${c.cyan}${c.bold}JARVIS:${c.reset}\n`);
-        }
-        fullResponse += chunk;
-        process.stdout.write(chunk);
-      }
-
-      if (!streamStarted) {
-        spinner.stop(true);
-      }
-      process.stdout.write('\n\n');
+      const fullResponse = await streamResponseWithReasoning(stream, spinner);
 
       // ── Interactive Tabbed Question Form (AskUserQuestion) ──────────────────
       const questionRegex = /```ask_question\s*\n([\s\S]*?)\n```/;
@@ -293,26 +352,14 @@ async function runInteractiveRepl() {
 
               const followUpSpinner = new JarvisSpinner('Synthesizing implementation with chosen specifications...');
               followUpSpinner.start();
-              let followUpStarted = false;
 
               const followUpCtx = await sys.pipeline.buildContext(decisionMsg, history);
               const followUpStream = sys.router.stream(
                 followUpCtx.messages,
                 queryEffort ? { reasoningEffort: queryEffort, taskHint: queryEffort === 'high' ? 'reasoning' : undefined } : undefined
               );
-              let followUpResponse = '';
 
-              for await (const chunk of followUpStream) {
-                if (!followUpStarted) {
-                  followUpSpinner.stop(true);
-                  followUpStarted = true;
-                  process.stdout.write(`\n${c.cyan}${c.bold}JARVIS:${c.reset}\n`);
-                }
-                followUpResponse += chunk;
-                process.stdout.write(chunk);
-              }
-              if (!followUpStarted) followUpSpinner.stop(true);
-              process.stdout.write('\n\n');
+              const followUpResponse = await streamResponseWithReasoning(followUpStream, followUpSpinner);
 
               history.push({ role: 'assistant', content: followUpResponse });
               sys.sessionStore.appendMessage(session.id, { role: 'user', content: decisionMsg });

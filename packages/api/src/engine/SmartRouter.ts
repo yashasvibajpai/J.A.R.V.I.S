@@ -310,6 +310,9 @@ export class SmartRouter implements LLMProvider {
       try {
         console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → trying ${profile.providerId}/${profile.modelId}`);
         const result = await profile.provider.chat(messages, effectiveOptions);
+        if (!result || !result.trim()) {
+          throw new Error(`Provider ${profile.providerId}/${profile.modelId} returned an empty response`);
+        }
         this.gate.recordUsage(profile, estimateTokens(result));
         this.lastUsedProvider = { providerId: profile.providerId, modelId: profile.modelId };
         console.log(`[router] ✓ ${profile.providerId}/${profile.modelId} responded (${taskType})`);
@@ -346,9 +349,10 @@ export class SmartRouter implements LLMProvider {
 
         // Validate first chunk before committing to this provider
         const first = await gen.next();
-        if (!first.done && first.value) {
-          yield first.value;
+        if (first.done || !first.value) {
+          throw new Error(`Provider ${profile.providerId}/${profile.modelId} returned an empty stream`);
         }
+        yield first.value;
 
         // First chunk worked — commit to this provider
         for await (const chunk of gen) {

@@ -38,47 +38,50 @@ export function buildProviderRegistry(): ProviderProfile[] {
   // ─── Free-Tier Cloud Providers ──────────────────────────────────────────
 
   // Google AI Studio — Gemini 2.5 Flash
-  if (process.env.GOOGLE_AI_API_KEY) {
+  const googleApiKey = process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_KEY;
+  if (googleApiKey) {
+    const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     profiles.push({
       provider: new OpenAICompatibleAdapter({
-        apiKey: process.env.GOOGLE_AI_API_KEY,
+        apiKey: googleApiKey,
         baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-        model: 'gemini-2.5-flash',
+        model: geminiModel,
         providerId: 'google',
         contextWindow: 1_000_000,
         supportsTools: true,
       }),
       providerId: 'google',
-      modelId: 'gemini-2.5-flash',
-      scores: { general: 8, coding: 7, reasoning: 8, creative: 7, quick: 7, tool_use: 7, embedding: 0 },
+      modelId: geminiModel,
+      scores: { general: 9, coding: 8, reasoning: 9, creative: 8, quick: 8, tool_use: 9, embedding: 0 },
       limits: { rpm: 10, rpd: 1500, tokensPerDay: 1_000_000 },
       state: freshState(),
       tier: 'free',
       contextWindow: 1_000_000,
     });
-    console.log('[registry] ✓ Google AI Studio (Gemini 2.5 Flash) registered — free tier');
+    console.log(`[registry] ✓ Google AI Studio (${geminiModel}) registered — free tier`);
   }
 
-  // Groq — GPT-OSS 120B / 20B (ultra-low latency)
+  // Groq — DeepSeek R1 / Llama 3.3 (ultra-low latency reasoning)
   if (process.env.GROQ_API_KEY) {
+    const groqModel = process.env.GROQ_MODEL || 'deepseek-r1-distill-llama-70b';
     profiles.push({
       provider: new OpenAICompatibleAdapter({
         apiKey: process.env.GROQ_API_KEY,
         baseURL: 'https://api.groq.com/openai/v1',
-        model: 'openai/gpt-oss-120b',
+        model: groqModel,
         providerId: 'groq',
         contextWindow: 128_000,
         supportsTools: true,
       }),
       providerId: 'groq',
-      modelId: 'gpt-oss-120b',
+      modelId: groqModel.includes('/') ? groqModel.split('/')[1] : groqModel,
       scores: { general: 8, coding: 8, reasoning: 9, creative: 7, quick: 10, tool_use: 8, embedding: 0 },
       limits: { rpm: 30, rpd: 14400, tokensPerDay: 500_000 },
       state: freshState(),
       tier: 'free',
       contextWindow: 128_000,
     });
-    console.log('[registry] ✓ Groq (GPT-OSS 120B) registered — free tier');
+    console.log(`[registry] ✓ Groq (${groqModel}) registered — free tier`);
   }
 
   // Cerebras (optional — requires active billing on API key)
