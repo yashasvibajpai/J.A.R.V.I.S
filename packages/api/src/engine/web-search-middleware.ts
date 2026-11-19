@@ -92,29 +92,14 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
         }
 
         if (results.length > 0 || stockData) {
-          const now = new Date();
-          const dateStr = now.toLocaleDateString('en-US', {
-            timeZone: 'Asia/Kolkata',
-            dateStyle: 'full',
-          });
-          const isoDate = now.toISOString().split('T')[0];
-
-          let searchBlock = `## Real-Time Live Grounding & Market Data (${dateStr})\n`;
-          searchBlock += `TODAY'S DATE IS ${isoDate}. The current year is ${now.getFullYear()}.\n\n`;
+          let searchBlock = `## Live Web & Market Search Context\n`;
 
           if (stockData) {
             searchBlock += `${stockData}\n`;
-            searchBlock += `CRITICAL INSTRUCTIONS FOR STOCK / FINANCIAL REPORTING:\n`;
-            searchBlock += `- The market data above is REAL-TIME live market data for this week in November ${now.getFullYear()}.\n`;
-            searchBlock += `- You MUST reference and analyze these exact tickers, prices, and 5-day percentage trends in your report.\n`;
-            searchBlock += `- Under NO circumstances generate "Hypothetical Week" or dates from 2024/2025. Today is in ${now.getFullYear()}.\n\n`;
           }
 
           if (results.length > 0) {
-            searchBlock += `### Verified Live Web News & Analyses\n`;
-            searchBlock += `Use these verified, up-to-date facts to provide an accurate answer grounded in the CURRENT date shown above. Do NOT use training data from past years — only the live results below.\n`;
-            searchBlock += `For financial, market, or macroeconomic questions, deliver factual news synthesis and market trend evaluation for research/educational purposes. Cite sources naturally.\n\n`;
-
+            searchBlock += `### Live Web News & Articles\n`;
             for (const res of results) {
               searchBlock += `- [${res.source || 'Web'}] **${res.title}**\n`;
               searchBlock += `  ${res.snippet}\n`;

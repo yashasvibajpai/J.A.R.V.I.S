@@ -50,27 +50,6 @@ export function loadCartridge(path?: string): JarvisCartridge {
 export function buildSystemPrompt(cartridge: JarvisCartridge): string {
   const sections: string[] = [];
 
-  // Current date/time anchor — prevents model from using stale training dates
-  const now = new Date();
-  const dateStr = now.toLocaleDateString('en-US', {
-    timeZone: 'Asia/Kolkata',
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-  const timeStr = now.toLocaleTimeString('en-US', {
-    timeZone: 'Asia/Kolkata',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  sections.push(
-    `## Current Date & Time`,
-    `Today is ${dateStr}, ${timeStr} IST (${now.toISOString().split('T')[0]}).`,
-    `The current year is ${now.getFullYear()}. Use ONLY this date as the reference for "today", "this week", "last week", etc.`,
-    ''
-  );
-
   // Identity
   sections.push(
     `You are ${cartridge.identity.name} (${cartridge.identity.fullName}).`,

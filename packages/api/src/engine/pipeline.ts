@@ -161,27 +161,102 @@ export class Pipeline {
   }
 }
 
-// ─── Built-in Middleware: System Prompt ───────────────────────────────────────
+// ─── Built-in Middleware: System Prompt & Temporal Context ──────────────────
 
 /**
- * Injects the personality system prompt at the start of the message list.
+ * Constructs a rich, real-time temporal context frame so the LLM intrinsically understands
+ * current date, time, year, yesterday, this week, last week, and trailing day windows.
+ */
+export function buildTemporalContext(now: Date = new Date(), timeZone: string = 'Asia/Kolkata'): string {
+  const dateFmt = (d: Date) =>
+    d.toLocaleDateString('en-US', {
+      timeZone,
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+
+  const shortDateFmt = (d: Date) =>
+    d.toLocaleDateString('en-US', {
+      timeZone,
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+
+  const timeFmt = (d: Date) =>
+    d.toLocaleTimeString('en-US', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'short',
+    });
+
+  const today = new Date(now);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  const sevenDaysAgo = new Date(now);
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  // Day of week (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
+  const dayOfWeek = today.getDay();
+  const diffToMonday = (dayOfWeek + 6) % 7;
+  const thisMonday = new Date(today);
+  thisMonday.setDate(today.getDate() - diffToMonday);
+
+  const lastMonday = new Date(thisMonday);
+  lastMonday.setDate(thisMonday.getDate() - 7);
+
+  const lastFriday = new Date(lastMonday);
+  lastFriday.setDate(lastMonday.getDate() + 4);
+
+  const lastSunday = new Date(lastMonday);
+  lastSunday.setDate(lastMonday.getDate() + 6);
+
+  const sections: string[] = [
+    `## Temporal Context (Real-Time Clock)`,
+    `- Current Time: ${timeFmt(now)}`,
+    `- Today: ${dateFmt(today)} (${today.toISOString().split('T')[0]})`,
+    `- Yesterday: ${dateFmt(yesterday)}`,
+    `- Current Year: ${now.getFullYear()}`,
+    `- Current Week: ${shortDateFmt(thisMonday)} – ${shortDateFmt(today)}`,
+    `- Last Week (Trading / Business): ${shortDateFmt(lastMonday)} – ${shortDateFmt(lastFriday)}`,
+    `- Last Week (Full Calendar): ${shortDateFmt(lastMonday)} – ${shortDateFmt(lastSunday)}`,
+    `- Trailing 7 Days: ${shortDateFmt(sevenDaysAgo)} – ${shortDateFmt(today)}`,
+    ``,
+    `Temporal Understanding:`,
+    `You are operating in real time at the date and hour above. When answering questions with relative time references (such as "today", "yesterday", "this week", "last week", "last 7 days", or "recent"), ground your analysis in these exact calendar windows.`,
+  ];
+
+  return sections.join('\n');
+}
+
+/**
+ * Injects the personality system prompt and live temporal context at the start of the message list.
  */
 export function systemPromptMiddleware(systemPrompt: string): Middleware {
   return async (ctx, next) => {
-    const currentDateTime = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'long' });
-    const dynamicSystemPrompt = `${systemPrompt}\n\n## System Information\nCurrent Date and Time: ${currentDateTime}`;
+    const temporalContext = buildTemporalContext(new Date(), 'Asia/Kolkata');
+    const dynamicSystemPrompt = `${systemPrompt}\n\n${temporalContext}`;
 
     // Prepend system message if not already present
     if (!ctx.messages.some((m) => m.role === 'system')) {
       ctx.messages.unshift({ role: 'system', content: dynamicSystemPrompt });
     } else {
-      const sysMsg = ctx.messages.find(m => m.role === 'system');
-      if (sysMsg && !sysMsg.content.includes('Current Date and Time')) {
-        sysMsg.content += `\n\n## System Information\nCurrent Date and Time: ${currentDateTime}`;
+      const sysMsg = ctx.messages.find((m) => m.role === 'system');
+      if (sysMsg) {
+        const marker = '## Temporal Context (Real-Time Clock)';
+        if (sysMsg.content.includes(marker)) {
+          const idx = sysMsg.content.indexOf(marker);
+          sysMsg.content = sysMsg.content.substring(0, idx).trim() + '\n\n' + temporalContext;
+        } else {
+          sysMsg.content += `\n\n${temporalContext}`;
+        }
       }
     }
-    // implement capture for system metrics here
-    // route to alertmanager for post log processing steps
 
     // Add the current user message
     ctx.messages.push({ role: 'user', content: ctx.userMessage });
