@@ -61,9 +61,9 @@ export function buildProviderRegistry(): ProviderProfile[] {
     console.log(`[registry] ✓ Google AI Studio (${geminiModel}) registered — free tier`);
   }
 
-  // Groq — Llama 3.3 70B Versatile (ultra-low latency)
+  // Groq — Qwen 3.8 27B / GPT-OSS 120B (ultra-low latency)
   if (process.env.GROQ_API_KEY) {
-    const groqModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    const groqModel = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
     profiles.push({
       provider: new OpenAICompatibleAdapter({
         apiKey: process.env.GROQ_API_KEY,

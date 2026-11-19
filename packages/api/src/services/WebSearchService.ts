@@ -117,7 +117,7 @@ export class WebSearchService {
       results.push({
         title: cleanTitle,
         url: link,
-        snippet: `Published ${pubDate} by ${source}`,
+        snippet: `[${source}] (Published ${pubDate}): ${cleanTitle}`,
         publishedAt: pubDate,
         source,
       });
