@@ -21,6 +21,7 @@ export class OpenAICompatibleAdapter implements LLMProvider {
   private _contextWindow: number;
   private _supportsTools: boolean;
   private extraHeaders: Record<string, string>;
+  private embedModel?: string;
 
   constructor(opts: {
     apiKey: string;
@@ -30,6 +31,7 @@ export class OpenAICompatibleAdapter implements LLMProvider {
     contextWindow?: number;
     supportsTools?: boolean;
     extraHeaders?: Record<string, string>;
+    embedModel?: string;
   }) {
     this.client = new OpenAI({
       apiKey: opts.apiKey,
@@ -41,6 +43,23 @@ export class OpenAICompatibleAdapter implements LLMProvider {
     this._contextWindow = opts.contextWindow ?? 32_768;
     this._supportsTools = opts.supportsTools ?? false;
     this.extraHeaders = opts.extraHeaders ?? {};
+    if (opts.embedModel) {
+      this.embedModel = opts.embedModel;
+      this.embed = this._embed.bind(this);
+    }
+  }
+
+  embed?: (text: string) => Promise<number[]>;
+
+  private async _embed(text: string): Promise<number[]> {
+    if (!this.embedModel) {
+      throw new Error(`Embedding model not configured for provider ${this.providerId}`);
+    }
+    const response = await this.client.embeddings.create({
+      model: this.embedModel,
+      input: text,
+    });
+    return response.data[0].embedding;
   }
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {

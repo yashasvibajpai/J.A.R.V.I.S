@@ -109,7 +109,7 @@ export function profileExtractionMiddleware(
               content: `Current profile context:\n${currentContext}\n\nUser said: "${userMessage}"\nAssistant replied: "${response}"`,
             },
           ],
-          { temperature: 0.1, maxTokens: 512 }
+          { temperature: 0.1, maxTokens: 512, taskHint: 'quick' }
         );
 
         // ── Zod-equivalent validation — no silent corruption ─────────────────

@@ -7,6 +7,9 @@
 /* ─── Design Tokens ──────────────────────────────────────────────────────── */
 
 :root {
+  color-scheme: dark;
+  accent-color: var(--accent);
+
   /* Core palette — dark, premium, Iron Man / arc reactor inspired */
   --bg-primary: #03080e;
   --bg-secondary: #0a121e;
@@ -137,13 +140,23 @@ a:hover { text-decoration: underline; }
 
 /* ─── Scrollbar ──────────────────────────────────────────────────────────── */
 
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--text-tertiary);
-  border-radius: var(--radius-full);
+* {
+  scrollbar-color: var(--text-tertiary) transparent;
+  scrollbar-width: thin;
 }
-::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+@supports not (scrollbar-color: auto) {
+  * {
+    scrollbar-width: auto;
+  }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--text-tertiary);
+    border-radius: var(--radius-full);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+}
 
 /* ─── Layout ─────────────────────────────────────────────────────────────── */
 

@@ -36,6 +36,11 @@ import { SQLiteSessionStore } from './stores/SQLiteSessionStore.js';
 import { LanceVectorStore } from './stores/LanceVectorStore.js';
 import { ObsidianCrawler } from './services/ObsidianCrawler.js';
 import { observabilityMiddleware } from './engine/observability.js';
+import { WebSearchService } from './services/WebSearchService.js';
+import { webSearchMiddleware } from './engine/web-search-middleware.js';
+import { FileService } from './services/FileService.js';
+import { filePromptMiddleware, fileActionMiddleware } from './engine/file-middleware.js';
+import { questionPromptMiddleware } from './engine/question-middleware.js';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -98,26 +103,37 @@ if (process.env.OPENCLAW_ENABLED === 'true') {
   console.log('[init] ✓ OpenClaw Gateway bridge active');
 }
 
+const webSearch = new WebSearchService();
+console.log('[init] ✓ WebSearchService active (Google News RSS + DDG)');
+
+const fileService = new FileService();
+console.log('[init] ✓ FileService active (Markdown & native PDF compilation)');
+
 // Build the message pipeline
-// Pre-LLM steps: observe → system prompt → toolCatalogue → calendar → profile
-//                → memory → knowledgeRAG → gbrain → taskRecall → tokenTruncation
+// Pre-LLM steps: observe → system prompt → toolCatalogue → filePrompt → calendar → profile
+//                → memory → knowledgeRAG → gbrain → webSearch → taskRecall → tokenTruncation
 // [LLM BOUNDARY]
-// Post-LLM steps (all async fire-and-forget): openclawAction → memoryExtract
+// Post-LLM steps (all async fire-and-forget): fileAction → openclawAction → memoryExtract
 //                → taskExtract → profileExtract → gbrainExtract
 const pipeline = new Pipeline()
   .use(observabilityMiddleware())
   .use(systemPromptMiddleware(systemPrompt))
   .use(toolCatalogueMiddleware(openclaw, profileStore))
+  .use(filePromptMiddleware())
+  .use(questionPromptMiddleware())
   .use(calendarMiddleware(profileStore))
   .use(profileInjectionMiddleware(profileStore))
   .use(memoryRecallMiddleware(memoryStore))
   .use(knowledgeMiddleware(vectorStore, chain))
   .use(gbrainMiddleware())
+  .use(webSearchMiddleware(webSearch))
   .use(taskRecallMiddleware(taskStore, reminderStore))
   .use(tokenTruncationMiddleware(6000))
   .markLlmBoundary()  // ← buildContext() stops here; streaming handles LLM itself
   .use(llmCallMiddleware(chain))
-  // Post-LLM steps — all use setImmediate internally (fire-and-forget):
+  // Post-LLM steps:
+  .use(fileActionMiddleware(fileService))
+  // Fire-and-forget steps:
   .use(openclawActionMiddleware(openclaw, chain, profileStore))
   .use(memoryExtractionMiddleware(memoryStore, chain))
   .use(taskExtractionMiddleware(taskStore, reminderStore, captureStore, chain))

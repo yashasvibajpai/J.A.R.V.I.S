@@ -45,11 +45,17 @@ function runGBrainCapture(content: string): Promise<void> {
     const child = spawn('gbrain', ['capture', '--stdin']);
     let stderr = '';
 
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch {}
+      reject(new Error('gbrain capture timed out after 10000ms'));
+    }, 10000);
+
     child.stderr.on('data', (data) => {
       stderr += data.toString();
     });
 
     child.on('close', (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve();
       } else {
@@ -58,6 +64,7 @@ function runGBrainCapture(content: string): Promise<void> {
     });
 
     child.on('error', (err) => {
+      clearTimeout(timer);
       reject(err);
     });
 

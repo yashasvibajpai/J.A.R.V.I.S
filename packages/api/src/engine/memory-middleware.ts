@@ -86,7 +86,7 @@ export function memoryExtractionMiddleware(
             role: 'user',
             content: `User said: "${userMessage}"\n\nAssistant replied: "${response}"`,
           },
-        ], { temperature: 0.1, maxTokens: 512 });
+        ], { temperature: 0.1, maxTokens: 512, taskHint: 'quick' });
 
         const facts = parseMemoryOutput(extraction);
 
@@ -119,11 +119,14 @@ export function memoryExtractionMiddleware(
 
 const EXTRACTION_PROMPT = `You are a memory extraction system. Given a conversation exchange, extract facts worth remembering about the user.
 
-Rules:
+CRITICAL RULES:
+- Only extract personal facts that the USER explicitly revealed about THEMSELVES (their preferences, job, family, plans, goals, tools, habits, etc.).
+- NEVER extract facts, world knowledge, news summaries, historical facts, or explanations provided by the ASSISTANT.
+- NEVER assume the user "is aware of", "is informed about", or "knows" something just because the assistant talked about it or because the user asked about it.
+- If the user merely asked a question (e.g. "what's the latest on X?", "how do I do Y?"), asked for news/help, or engaged in general conversation without disclosing personal facts, respond with "NONE".
 - Only extract CONCRETE, SPECIFIC facts — not vague observations.
 - Each fact should stand alone without context.
 - Skip pleasantries, greetings, and meta-conversation.
-- If NOTHING worth remembering was said, respond with "NONE".
 
 Respond in this exact format (one fact per line):
 [category] fact content
@@ -138,7 +141,7 @@ Examples:
 [event] User has a job interview next Tuesday
 [context] User is currently stressed about a project deadline
 
-If nothing worth remembering: NONE`;
+If nothing personal worth remembering about the user was shared: NONE`;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

@@ -10,6 +10,8 @@
     "dev": "pnpm -r run dev",
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
-    "lint": "pnpm -r run lint"
+    "lint": "pnpm -r run lint",
+    "doctor": "pnpm --filter @jarvis/api run doctor",
+    "jarvis": "pnpm --filter @jarvis/api run jarvis"
   }
 }

@@ -281,6 +281,10 @@ export default function Home() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      // Block submission during IME composition (Chinese/Japanese/Korean input or Safari 229)
+      if (e.nativeEvent.isComposing || e.keyCode === 229) {
+        return;
+      }
       sendMessage();
     }
   };
@@ -775,8 +779,8 @@ function ProfilePanel({
   useEffect(() => {
     if (profile) {
       setEditName(profile.preferredName || profile.name);
-      setEditRole(profile.context?.role || "");
-      setEditLocation(profile.context?.location || "");
+      setEditRole(typeof profile.context?.role === "string" ? profile.context.role : "");
+      setEditLocation(typeof profile.context?.location === "string" ? profile.context.location : "");
     }
   }, [profile, isEditing]);
 

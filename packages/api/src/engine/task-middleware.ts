@@ -75,7 +75,7 @@ export function taskExtractionMiddleware(
         const extraction = await llm.chat([
           { role: 'system', content: TASK_EXTRACTION_PROMPT },
           { role: 'user', content: `User: "${userMessage}"\nJARVIS: "${response}"` }
-        ], { temperature: 0.1, maxTokens: 512 });
+        ], { temperature: 0.1, maxTokens: 512, taskHint: 'quick' });
 
         // ── Validated parse — unknown action types and malformed lines dropped ─
         const actions = parseTaskOutput(extraction);
@@ -124,13 +124,21 @@ export function taskExtractionMiddleware(
 }
 
 const TASK_EXTRACTION_PROMPT = `You are an Action Extraction system. Given a conversation, extract new tasks, reminders, or quick thoughts.
+
+CRITICAL RULES:
+- Only extract tasks, reminders, or notes that the USER explicitly asked to create, remember, schedule, or capture.
+- DO NOT summarize the assistant's reply, conversation topic, or world events as a [capture] or [task].
+- DO NOT capture general knowledge, world news, explanations, or facts as a thought or task.
+- If the user was merely asking a question, making small talk, or did not express an action/reminder/thought to capture, output NONE.
+
 Output in the exact format (one per line):
 [task_create] description of the task
 [task_complete] task_id (if a specific task ID was mentioned)
 [reminder_create] description of the reminder
-[capture] quick unstructured thought or link to process later
+[capture] quick unstructured personal thought, idea, or link the user wanted to save for later
 
-Only extract if the user implicitly or explicitly requested it. If nothing, output NONE.
 Example:
 [task_create] Buy groceries tomorrow
-[capture] Gamify the onboarding flow`;
+[capture] Gamify the onboarding flow
+
+If nothing to extract: NONE`;

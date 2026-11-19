@@ -59,51 +59,51 @@ export function buildProviderRegistry(): ProviderProfile[] {
     console.log('[registry] ✓ Google AI Studio (Gemini 2.5 Flash) registered — free tier');
   }
 
-  // Groq — Llama 4 Scout (ultra-low latency)
+  // Groq — GPT-OSS 120B / 20B (ultra-low latency)
   if (process.env.GROQ_API_KEY) {
     profiles.push({
       provider: new OpenAICompatibleAdapter({
         apiKey: process.env.GROQ_API_KEY,
         baseURL: 'https://api.groq.com/openai/v1',
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'openai/gpt-oss-120b',
         providerId: 'groq',
-        contextWindow: 131_072,
+        contextWindow: 128_000,
         supportsTools: true,
       }),
       providerId: 'groq',
-      modelId: 'llama-4-scout',
-      scores: { general: 7, coding: 6, reasoning: 7, creative: 6, quick: 10, tool_use: 6, embedding: 0 },
+      modelId: 'gpt-oss-120b',
+      scores: { general: 8, coding: 8, reasoning: 9, creative: 7, quick: 10, tool_use: 8, embedding: 0 },
       limits: { rpm: 30, rpd: 14400, tokensPerDay: 500_000 },
       state: freshState(),
       tier: 'free',
-      contextWindow: 131_072,
+      contextWindow: 128_000,
     });
-    console.log('[registry] ✓ Groq (Llama 4 Scout) registered — free tier');
+    console.log('[registry] ✓ Groq (GPT-OSS 120B) registered — free tier');
   }
 
-  // Cerebras — Llama 3.3 70B (high throughput)
-  if (process.env.CEREBRAS_API_KEY) {
+  // Cerebras (optional — requires active billing on API key)
+  if (process.env.CEREBRAS_API_KEY && process.env.CEREBRAS_ENABLED === 'true') {
     profiles.push({
       provider: new OpenAICompatibleAdapter({
         apiKey: process.env.CEREBRAS_API_KEY,
         baseURL: 'https://api.cerebras.ai/v1',
-        model: 'llama-3.3-70b',
+        model: 'llama3.3-70b',
         providerId: 'cerebras',
         contextWindow: 128_000,
         supportsTools: false,
       }),
       providerId: 'cerebras',
-      modelId: 'llama-3.3-70b',
+      modelId: 'llama3.3-70b',
       scores: { general: 7, coding: 7, reasoning: 6, creative: 6, quick: 9, tool_use: 6, embedding: 0 },
       limits: { rpm: 30, rpd: 1000, tokensPerDay: 1_000_000 },
       state: freshState(),
       tier: 'free',
       contextWindow: 128_000,
     });
-    console.log('[registry] ✓ Cerebras (Llama 3.3 70B) registered — free tier');
+    console.log('[registry] ✓ Cerebras registered — free tier');
   }
 
-  // Mistral — Codestral (coding specialist)
+  // Mistral — Codestral & Mistral Embed
   if (process.env.MISTRAL_API_KEY) {
     profiles.push({
       provider: new OpenAICompatibleAdapter({
@@ -113,36 +113,17 @@ export function buildProviderRegistry(): ProviderProfile[] {
         providerId: 'mistral-code',
         contextWindow: 256_000,
         supportsTools: false,
+        embedModel: 'mistral-embed',
       }),
       providerId: 'mistral-code',
       modelId: 'codestral-latest',
-      scores: { general: 5, coding: 10, reasoning: 5, creative: 4, quick: 6, tool_use: 5, embedding: 0 },
+      scores: { general: 6, coding: 10, reasoning: 6, creative: 4, quick: 6, tool_use: 5, embedding: 2 },
       limits: { rpm: 2, rpd: 500, tokensPerDay: 500_000_000 }, // 1B tokens/month ≈ ~33M/day
       state: freshState(),
       tier: 'free',
       contextWindow: 256_000,
     });
-    console.log('[registry] ✓ Mistral (Codestral) registered — free tier');
-
-    // Also register Mistral Large for general/reasoning tasks
-    profiles.push({
-      provider: new OpenAICompatibleAdapter({
-        apiKey: process.env.MISTRAL_API_KEY,
-        baseURL: 'https://api.mistral.ai/v1',
-        model: 'mistral-large-latest',
-        providerId: 'mistral-large',
-        contextWindow: 128_000,
-        supportsTools: true,
-      }),
-      providerId: 'mistral-large',
-      modelId: 'mistral-large-latest',
-      scores: { general: 8, coding: 7, reasoning: 8, creative: 8, quick: 4, tool_use: 7, embedding: 0 },
-      limits: { rpm: 2, rpd: 500, tokensPerDay: 500_000_000 },
-      state: freshState(),
-      tier: 'free',
-      contextWindow: 128_000,
-    });
-    console.log('[registry] ✓ Mistral (Large) registered — free tier');
+    console.log('[registry] ✓ Mistral (Codestral + mistral-embed) registered — free tier');
   }
 
   // OpenRouter — free model router
@@ -199,13 +180,13 @@ export function buildProviderRegistry(): ProviderProfile[] {
     ),
     providerId: 'ollama-local',
     modelId: process.env.OLLAMA_MODEL || 'gemma4:e2B',
-    scores: { general: 6, coding: 5, reasoning: 5, creative: 5, quick: 6, tool_use: 5, embedding: 5 },
+    scores: { general: 6, coding: 5, reasoning: 5, creative: 5, quick: 6, tool_use: 5, embedding: 10 },
     limits: { rpm: 999, rpd: 999999, tokensPerDay: 999_999_999 }, // effectively unlimited
     state: freshState(),
     tier: 'local',
     contextWindow: 8192,
   });
-  console.log('[registry] ✓ Ollama Local registered — unlimited');
+  console.log('[registry] ✓ Ollama Local registered — unlimited (768-dim embeddings)');
 
   // ─── Paid Providers (fallback when all free exhausted) ──────────────────
 

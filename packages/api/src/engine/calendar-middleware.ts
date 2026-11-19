@@ -66,8 +66,17 @@ export function calendarMiddleware(profileStore: ProfileStore): Middleware {
       const sysIndex = ctx.messages.findIndex((m) => m.role === 'system');
       ctx.messages.splice(sysIndex + 1, 0, injection);
 
-    } catch (err) {
-      console.warn(`[calendar] recall failed: ${err}`);
+    } catch (err: any) {
+      if (err?.message?.includes('invalid_grant') || String(err).includes('invalid_grant')) {
+        console.warn(`[calendar] Google OAuth refresh token has expired or was revoked (invalid_grant). Clearing token. Re-authenticate at /auth/google.`);
+        try {
+          await profileStore.updateProfile('default', {
+            preferences: { google_refresh_token: '' }
+          });
+        } catch {}
+      } else {
+        console.warn(`[calendar] recall failed: ${err}`);
+      }
     }
 
     await next();

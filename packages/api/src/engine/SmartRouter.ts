@@ -33,6 +33,11 @@ const TOOL_USE_KEYWORDS = [
   'search the web', 'look up', 'browse', 'open', 'run command',
   'execute', 'list files', 'read file', 'write file', 'schedule',
   'search online', 'google', 'fetch', 'download',
+  'latest on', 'latest news', 'what is the latest', "what's the latest",
+  'breaking news', 'current events', 'today in', 'news on', 'weather in',
+  'stock price', 'price of',
+  'create pdf', 'generate pdf', 'compile pdf', 'save pdf', '.pdf',
+  'create file', 'save to file', 'save as', 'write to file',
 ];
 
 /**
@@ -43,6 +48,9 @@ export function classifyTask(userMessage: string, _history?: Message[]): TaskTyp
   const lower = userMessage.toLowerCase();
   const wordCount = userMessage.trim().split(/\s+/).length;
 
+  // Tool use — explicit action or real-time information requests (check before length heuristics)
+  if (TOOL_USE_KEYWORDS.some(k => lower.includes(k))) return 'tool_use';
+
   // Quick queries — short, simple questions
   if (wordCount <= 12 && !lower.includes('```') && !lower.includes('code')) {
     // Check if it's NOT a creative/reasoning request first
@@ -50,9 +58,6 @@ export function classifyTask(userMessage: string, _history?: Message[]): TaskTyp
       && !CREATIVE_KEYWORDS.some(k => lower.includes(k));
     if (isSimple) return 'quick';
   }
-
-  // Tool use — explicit action requests
-  if (TOOL_USE_KEYWORDS.some(k => lower.includes(k))) return 'tool_use';
 
   // Coding — code blocks, file extensions, programming keywords
   const codingScore = CODING_KEYWORDS.filter(k => lower.includes(k)).length;
@@ -254,7 +259,7 @@ export class SmartRouter implements LLMProvider {
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
     const userMessage = this.extractUserMessage(messages);
-    const taskType = classifyTask(userMessage, messages);
+    const taskType = options?.taskHint ?? classifyTask(userMessage, messages);
     const ordered = this.rankProviders(taskType);
 
     let lastError: Error | null = null;
@@ -286,7 +291,7 @@ export class SmartRouter implements LLMProvider {
 
   async *stream(messages: Message[], options?: LLMOptions): AsyncGenerator<string> {
     const userMessage = this.extractUserMessage(messages);
-    const taskType = classifyTask(userMessage, messages);
+    const taskType = options?.taskHint ?? classifyTask(userMessage, messages);
     const ordered = this.rankProviders(taskType);
 
     let lastError: Error | null = null;
@@ -331,12 +336,15 @@ export class SmartRouter implements LLMProvider {
   async embed(text: string): Promise<number[]> {
     let lastError: Error | null = null;
 
-    for (const profile of this.registry) {
-      if (!profile.provider.embed) continue;
+    // Rank candidates by embedding score descending so native 768-dim providers are preferred
+    const candidates = this.registry
+      .filter((p) => Boolean(p.provider.embed) && this.gate.canUse(p))
+      .sort((a, b) => (b.scores.embedding ?? 0) - (a.scores.embedding ?? 0));
 
+    for (const profile of candidates) {
       try {
         console.log(`[router] embedding via ${profile.providerId}...`);
-        const vector = await profile.provider.embed(text);
+        const vector = await profile.provider.embed!(text);
         this.gate.recordUsage(profile, estimateTokens(text));
         return vector;
       } catch (err) {

@@ -51,20 +51,28 @@ export class LanceVectorStore implements VectorStore {
     await this.init();
     if (!this.table) return [];
 
-    const results = await this.table
-      .vectorSearch(vector)
-      .limit(limit)
-      .toArray();
+    try {
+      const results = await this.table
+        .vectorSearch(vector)
+        .limit(limit)
+        .toArray();
 
-    return results.map(r => {
-      // omit internal vector field and return the rest as metadata
-      const { vector: _v, _distance, id, ...metadata } = r as any;
-      return {
-        id,
-        score: _distance, // In LanceDB, L2 distance is returned. Lower is better.
-        metadata
-      };
-    });
+      return results.map(r => {
+        // omit internal vector field and return the rest as metadata
+        const { vector: _v, _distance, id, ...metadata } = r as any;
+        return {
+          id,
+          score: _distance, // In LanceDB, L2 distance is returned. Lower is better.
+          metadata
+        };
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('No vector column found') || err?.message?.includes('dimension')) {
+        console.warn(`[lancedb] Vector dimension mismatch (query vector: ${vector.length}). Skipping RAG match.`);
+        return [];
+      }
+      throw err;
+    }
   }
 
   async delete(id: string): Promise<void> {

@@ -43,63 +43,67 @@ async function checkEnvFile(): Promise<boolean> {
 async function checkLLMProviders(): Promise<boolean> {
   let anyAvailable = false;
 
+  // Google Gemini
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_KEY || process.env.GOOGLE_AI_API_KEY;
+  if (geminiKey) {
+    pass(`Google Gemini configured (${process.env.GEMINI_MODEL || 'gemini-2.5-flash'})`);
+    anyAvailable = true;
+  } else {
+    info('GEMINI_API_KEY not set (optional)');
+  }
+
+  // Groq
+  if (process.env.GROQ_API_KEY) {
+    pass(`Groq configured (${process.env.GROQ_MODEL || 'openai/gpt-oss-120b'})`);
+    anyAvailable = true;
+  } else {
+    info('GROQ_API_KEY not set (optional)');
+  }
+
+  // Mistral
+  if (process.env.MISTRAL_API_KEY) {
+    pass(`Mistral configured (${process.env.MISTRAL_CODE_MODEL || 'codestral-latest'})`);
+    anyAvailable = true;
+  } else {
+    info('MISTRAL_API_KEY not set (optional)');
+  }
+
   // Anthropic
   if (process.env.ANTHROPIC_API_KEY) {
-    try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1,
-          messages: [{ role: 'user', content: 'ping' }],
-        }),
-      });
-      if (res.ok || res.status === 400) {
-        pass('Anthropic API key valid');
-        anyAvailable = true;
-      } else if (res.status === 401) {
-        fail('Anthropic API key invalid (401)');
-      } else {
-        warn(`Anthropic API responded with ${res.status}`);
-        anyAvailable = true;
-      }
-    } catch {
-      fail('Anthropic API unreachable');
-    }
+    pass('Anthropic configured');
+    anyAvailable = true;
   } else {
     info('ANTHROPIC_API_KEY not set (optional)');
   }
 
   // OpenAI
   if (process.env.OPENAI_API_KEY) {
-    try {
-      const res = await fetch('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-      });
-      if (res.ok) {
-        pass('OpenAI API key valid');
-        anyAvailable = true;
-      } else if (res.status === 401) {
-        fail('OpenAI API key invalid (401)');
-      } else {
-        warn(`OpenAI API responded with ${res.status}`);
-      }
-    } catch {
-      fail('OpenAI API unreachable');
-    }
+    pass('OpenAI configured');
+    anyAvailable = true;
   } else {
     info('OPENAI_API_KEY not set (optional)');
+  }
+
+  // OpenRouter
+  if (process.env.OPENROUTER_API_KEY) {
+    pass('OpenRouter configured');
+    anyAvailable = true;
+  } else {
+    info('OPENROUTER_API_KEY not set (optional)');
+  }
+
+  // Cerebras
+  if (process.env.CEREBRAS_API_KEY && process.env.CEREBRAS_ENABLED === 'true') {
+    pass('Cerebras configured (active)');
+    anyAvailable = true;
+  } else if (process.env.CEREBRAS_API_KEY) {
+    info('Cerebras key present but CEREBRAS_ENABLED != true (billing paused)');
   }
 
   // Ollama
   const ollamaHost = process.env.OLLAMA_HOST || 'http://localhost:11434';
   try {
-    const res = await fetch(`${ollamaHost}/api/tags`);
+    const res = await fetch(`${ollamaHost}/api/tags`, { signal: AbortSignal.timeout(2000) });
     if (res.ok) {
       const data = await res.json() as { models?: Array<{ name: string }> };
       const models = data.models || [];
@@ -111,13 +115,15 @@ async function checkLLMProviders(): Promise<boolean> {
         warn(`Target model ${targetModel} not found — run: ollama pull ${targetModel}`);
       }
       anyAvailable = true;
+    } else {
+      warn(`Ollama responded with ${res.status}`);
     }
   } catch {
-    warn(`Ollama not running at ${ollamaHost}`);
+    info(`Ollama not running at ${ollamaHost} (optional local LLM/embedding fallback)`);
   }
 
   if (!anyAvailable) {
-    fail('No LLM provider available — configure at least one');
+    fail('No LLM provider available — configure at least one in .env');
     return false;
   }
 

@@ -48,6 +48,11 @@ function runGBrainThink(query: string): Promise<string> {
     let stdout = '';
     let stderr = '';
 
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch {}
+      reject(new Error('gbrain think timed out after 8000ms'));
+    }, 8000);
+
     child.stdout.on('data', (data) => {
       stdout += data.toString();
     });
@@ -57,6 +62,7 @@ function runGBrainThink(query: string): Promise<string> {
     });
 
     child.on('close', (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -65,6 +71,7 @@ function runGBrainThink(query: string): Promise<string> {
     });
 
     child.on('error', (err) => {
+      clearTimeout(timer);
       reject(err);
     });
   });

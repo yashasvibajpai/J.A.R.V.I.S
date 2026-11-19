@@ -123,6 +123,56 @@ JARVIS checks your schedule and injects today's events into the conversation con
    ```
 4. Visit `http://localhost:3001/auth/google` in your browser to complete OAuth
 
+### 💻 Autonomous Terminal Agent (Claude Code-style CLI)
+
+JARVIS can run directly inside your terminal as an interactive agent with real-time token streaming, file inspection, live internet search, and command execution:
+
+```bash
+# Launch interactive REPL
+pnpm jarvis
+
+# One-shot command execution
+pnpm jarvis "What's the latest on Iran?"
+```
+
+**Slash Commands in CLI:**
+| Command | Description |
+|---|---|
+| `/help` | Display command reference and agent capabilities |
+| `/btw <question>` | **Ephemeral Side Question**: Ask a quick aside in a floating overlay card without polluting your main conversation context |
+| `/ask` | **Interactive Tabbed Question Wizard**: Launch multi-tab design decision forms with arrow navigation and multi-select |
+| `/status` | View system health, active profile, memory count, and vector database stats |
+| `/read <path>` | Inspect local workspace files with preview |
+| `/write <path> <text>` | Create or update files directly |
+| `/pdf <file.pdf> <markdown>` | Compile formatted PDF documents directly from terminal |
+| `/search <query>` | Perform real-time web search (Google News RSS & DuckDuckGo) |
+| `/rag <query>` | Query Obsidian Vault vector embeddings via LanceDB |
+| `/exec <command>` | Run shell commands with interactive `[y/N]` confirmation prompts |
+| `/clear` | Clear conversation history and reset terminal |
+| `/exit` | Exit the terminal session |
+
+**Signature Claude Code-style UX Highlights:**
+- **Tabbed Question Forms (`AskUserQuestion`)**: When design choices or technical decisions are required, JARVIS displays a native terminal wizard with `[↑/↓]` selection, `[Space]` toggle, and `[Tab]` switching instead of walls of numbered questions.
+- **Floating Ephemeral Asides (`/btw`)**: Pop up quick side questions mid-workflow. The response is displayed in a distinct floating card and excluded from session history.
+- **Whimsical Marvel J.A.R.V.I.S. & Vision Spinners**: Real-time rotating telemetry verbs (*"Calibrating repulsor telemetry..."*, *"Synthesizing neural pathways with the Mind Stone..."*, *"Modulating vibranium matrix frequencies..."*) with context-aware tips.
+
+### 📄 Native Document & PDF Generation
+
+JARVIS creates and compiles documents directly to disk without requiring external tools or headless browsers:
+
+- **PDF Documents** — Generates PDF 1.4-compliant multi-page documents with word wrapping, Helvetica headers, bullet points, code blocks, dividers, and page numbers (`Page X of Y`).
+- **Markdown Notes** — Writes structured `.md` files directly to your workspace or Obsidian Vault.
+- **Natural Language Trigger** — Simply ask in chat or CLI:
+  ```
+  "Generate an executive briefing on AI chips and save it to documents/chips.pdf"
+  ```
+
+### 🌐 Native Real-Time Web Search (Zero OpenClaw Dependency)
+
+- Queries **Google News RSS** for real-time news headlines, articles, and breaking events.
+- Queries **DuckDuckGo Instant Answer API** for zero-bot-challenge entity definitions.
+- Automatically upgrades to **Tavily** (`TAVILY_API_KEY`) or **Brave Search** (`BRAVE_API_KEY`) if present in `.env`.
+
 ### 🔧 Tool Execution (OpenClaw)
 
 When [OpenClaw](https://openclaw.dev) is enabled, JARVIS can execute real actions:
@@ -252,7 +302,8 @@ Open **http://localhost:3000** in your browser.
 ### 4. Run Diagnostics
 
 ```bash
-pnpm --filter @jarvis/api doctor
+pnpm run doctor
+# or: pnpm --filter @jarvis/api run doctor
 ```
 
 This checks Node version, `.env` configuration, provider connectivity, personality cartridge, data directories, and GBrain integration status.
