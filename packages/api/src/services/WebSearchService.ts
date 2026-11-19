@@ -79,38 +79,52 @@ export class WebSearchService {
     }
 
     // 3. For news, current events, or time-sensitive queries:
-    // Combine Google News RSS (breaking headlines) + DuckDuckGo HTML (article snippets)
+    // Combine Google News RSS (breaking headlines) + DuckDuckGo HTML (article snippets) concurrently
     const isNewsQuery = this.isCurrentEventsQuery(cleanQuery);
     if (isNewsQuery) {
-      const combined: SearchResult[] = [];
-      const seenUrls = new Set<string>();
+      const targetCount = Math.max(maxResults, 6);
+      const [newsResults, ddgResults] = await Promise.all([
+        this.searchGoogleNews(cleanQuery, targetCount).catch((err) => {
+          console.warn(`[web-search] Google News RSS failed: ${err}`);
+          return [] as SearchResult[];
+        }),
+        this.searchDuckDuckGoHtml(cleanQuery, targetCount).catch((err) => {
+          console.warn(`[web-search] DuckDuckGo HTML search failed: ${err}`);
+          return [] as SearchResult[];
+        }),
+      ]);
 
-      try {
-        const ddgResults = await this.searchDuckDuckGoHtml(cleanQuery, maxResults);
-        for (const r of ddgResults) {
-          if (!seenUrls.has(r.url)) {
-            seenUrls.add(r.url);
-            combined.push(r);
-          }
+      const combined: SearchResult[] = [];
+      const seenTitles = new Set<string>();
+
+      // Filter out generic landing pages (e.g. /latest with no article slug)
+      const isGenericHub = (r: SearchResult) =>
+        /(\/latest\/?$|\/news\/?$|\/trending\/?$)/i.test(r.url) ||
+        (r.snippet.length < 80 && /track.*in real time|see the latest/i.test(r.snippet));
+
+      // 1. Add verified breaking news headlines first (they carry fresh timestamps)
+      for (const r of newsResults) {
+        const normTitle = r.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
+        if (!seenTitles.has(normTitle)) {
+          seenTitles.add(normTitle);
+          combined.push(r);
         }
-      } catch (err) {
-        console.warn(`[web-search] DuckDuckGo HTML search failed: ${err}`);
       }
 
-      try {
-        const newsResults = await this.searchGoogleNews(cleanQuery, maxResults);
-        for (const r of newsResults) {
-          if (!seenUrls.has(r.url)) {
-            seenUrls.add(r.url);
-            combined.push(r);
-          }
+      // 2. Add detailed DDG article snippets (putting substantive articles above generic landing pages)
+      const specificDdg = ddgResults.filter((r) => !isGenericHub(r));
+      const genericDdg = ddgResults.filter((r) => isGenericHub(r));
+
+      for (const r of [...specificDdg, ...genericDdg]) {
+        const normTitle = r.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30);
+        if (!seenTitles.has(normTitle)) {
+          seenTitles.add(normTitle);
+          combined.push(r);
         }
-      } catch (err) {
-        console.warn(`[web-search] Google News RSS failed: ${err}`);
       }
 
       if (combined.length > 0) {
-        return combined.slice(0, Math.max(maxResults, 5));
+        return combined.slice(0, targetCount);
       }
     }
 

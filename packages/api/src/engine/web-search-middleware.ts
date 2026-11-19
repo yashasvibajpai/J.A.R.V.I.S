@@ -73,9 +73,9 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
         const searchQuery = extractSearchKeywords(message);
         console.log(`[web-search] Searching live web for: "${searchQuery}" (cleaned from: "${message.substring(0, 50)}...")`);
 
-        // Concurrently fetch web search results and live stock quotes (if applicable)
+        // Concurrently fetch web search results (up to 6) and live stock quotes (if applicable)
         const [searchResults, stockData] = await Promise.all([
-          searchService.search(searchQuery, 4),
+          searchService.search(searchQuery, 6),
           searchService.getLiveStockData(message),
         ]);
 
@@ -84,7 +84,7 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
         // Fallback to original message if cleaned query returned 0 results
         if (results.length === 0 && searchQuery !== message) {
           console.log(`[web-search] Retrying search with raw query...`);
-          results = await searchService.search(message, 4);
+          results = await searchService.search(message, 6);
         }
 
         if (stockData) {
@@ -92,7 +92,11 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
         }
 
         if (results.length > 0 || stockData) {
-          let searchBlock = `## Live Web & Market Search Context\n`;
+          let searchBlock = `## Verified Real-Time Web Intelligence (Highest Ground Truth Priority)\n` +
+            `The information below was retrieved live from the internet in real time. ` +
+            `It reflects verified current developments and MUST serve as your primary source of truth. ` +
+            `Always prioritize these live search results over your internal pre-training cutoff or historical knowledge whenever discussing current events, news, companies, executive leadership, or market prices. ` +
+            `If the live search results report breaking changes (e.g. leadership departures, resignations, price movements, or events), synthesize and lead with these verified facts rather than relying on prior memory.\n\n`;
 
           if (stockData) {
             searchBlock += `${stockData}\n`;
@@ -101,7 +105,8 @@ export function webSearchMiddleware(searchService: WebSearchService): Middleware
           if (results.length > 0) {
             searchBlock += `### Live Web News & Articles\n`;
             for (const res of results) {
-              searchBlock += `- [${res.source || 'Web'}] **${res.title}**\n`;
+              const pubInfo = res.publishedAt ? ` [Published: ${res.publishedAt}]` : '';
+              searchBlock += `- [${res.source || 'Web'}] **${res.title}**${pubInfo}\n`;
               searchBlock += `  ${res.snippet}\n`;
               searchBlock += `  Link: ${res.url}\n\n`;
             }
