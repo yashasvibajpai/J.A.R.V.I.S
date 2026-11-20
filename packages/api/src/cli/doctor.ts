@@ -85,11 +85,11 @@ async function checkLLMProviders(): Promise<boolean> {
   }
 
   // OpenRouter
-  if (process.env.OPENROUTER_API_KEY) {
-    pass('OpenRouter configured');
+  if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim()) {
+    pass(`OpenRouter configured (${process.env.OPENROUTER_MODEL || 'openrouter/free'})`);
     anyAvailable = true;
   } else {
-    info('OPENROUTER_API_KEY not set (optional)');
+    info('OPENROUTER_API_KEY not set (optional — free router fallback: openrouter/free)');
   }
 
   // Cerebras

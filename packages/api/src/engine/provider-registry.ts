@@ -129,13 +129,15 @@ export function buildProviderRegistry(): ProviderProfile[] {
     console.log('[registry] ✓ Mistral (Codestral + mistral-embed) registered — free tier');
   }
 
-  // OpenRouter — free model router
-  if (process.env.OPENROUTER_API_KEY) {
+  // OpenRouter — free model router (https://openrouter.ai/docs/guides/routing/routers/free-router)
+  if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim()) {
+    const openrouterModel = process.env.OPENROUTER_MODEL || 'openrouter/free';
+    const modelId = openrouterModel.includes('/') ? openrouterModel.split('/')[1] : openrouterModel;
     profiles.push({
       provider: new OpenAICompatibleAdapter({
-        apiKey: process.env.OPENROUTER_API_KEY,
+        apiKey: process.env.OPENROUTER_API_KEY.trim(),
         baseURL: 'https://openrouter.ai/api/v1',
-        model: 'openrouter/free',
+        model: openrouterModel,
         providerId: 'openrouter',
         contextWindow: 128_000,
         supportsTools: false,
@@ -145,14 +147,14 @@ export function buildProviderRegistry(): ProviderProfile[] {
         },
       }),
       providerId: 'openrouter',
-      modelId: 'free',
-      scores: { general: 6, coding: 5, reasoning: 6, creative: 6, quick: 5, tool_use: 5, embedding: 0 },
-      limits: { rpm: 20, rpd: 50, tokensPerDay: 500_000 }, // conservative for free tier
+      modelId,
+      scores: { general: 7, coding: 6, reasoning: 6, creative: 6, quick: 7, tool_use: 5, embedding: 0 },
+      limits: { rpm: 20, rpd: 200, tokensPerDay: 1_000_000 },
       state: freshState(),
       tier: 'free',
       contextWindow: 128_000,
     });
-    console.log('[registry] ✓ OpenRouter (free) registered — free tier');
+    console.log(`[registry] ✓ OpenRouter (${openrouterModel}) registered — free tier fallback`);
   }
 
   // Ollama Cloud — large models on remote infrastructure

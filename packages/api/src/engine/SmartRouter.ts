@@ -304,7 +304,7 @@ export class SmartRouter implements LLMProvider {
     const userMessage = this.extractUserMessage(normalized);
     const taskType = options?.taskHint ?? classifyTask(userMessage, normalized);
     const effectiveOptions = this.resolveEffectiveOptions(taskType, options);
-    const ordered = this.rankProviders(taskType);
+    const ordered = this.rankProviders(taskType, effectiveOptions);
 
     let lastError: Error | null = null;
 
@@ -341,7 +341,7 @@ export class SmartRouter implements LLMProvider {
     const userMessage = this.extractUserMessage(normalized);
     const taskType = options?.taskHint ?? classifyTask(userMessage, normalized);
     const effectiveOptions = this.resolveEffectiveOptions(taskType, options);
-    const ordered = this.rankProviders(taskType);
+    const ordered = this.rankProviders(taskType, effectiveOptions);
 
     let lastError: Error | null = null;
 
@@ -503,8 +503,10 @@ export class SmartRouter implements LLMProvider {
    * 1. Filter out unavailable/rate-limited providers
    * 2. Sort by task-specific score (descending)
    * 3. Within same score, prefer free/local over paid
+   * 4. For low non-research tasks ('quick', 'general') or when freeOnly is active,
+   *    restrict strictly to free/local tiers (no paid fallback).
    */
-  private rankProviders(taskType: TaskType): ProviderProfile[] {
+  private rankProviders(taskType: TaskType, options?: LLMOptions): ProviderProfile[] {
     const available = this.registry.filter(p => this.gate.canUse(p));
 
     // Separate by tier
@@ -517,6 +519,15 @@ export class SmartRouter implements LLMProvider {
 
     free.sort(sortByScore);
     paid.sort(sortByScore);
+
+    // Enforce free-tier only for low non-research tasks (quick, general)
+    // or when freeOnly is explicitly set in options or JARVIS_FREE_ONLY env.
+    const isLowNonResearch = taskType === 'quick' || taskType === 'general';
+    const forceFreeOnly = Boolean(options?.freeOnly) || process.env.JARVIS_FREE_ONLY === 'true';
+
+    if (isLowNonResearch || forceFreeOnly) {
+      return free;
+    }
 
     // Free first, then paid fallbacks
     return [...free, ...paid];

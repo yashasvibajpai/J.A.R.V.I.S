@@ -27,6 +27,8 @@ export interface LLMOptions {
   reasoningEffort?: ReasoningEffort;
   /** Explicit thinking token budget if supported (e.g. Gemini / Claude) */
   thinkingBudget?: number;
+  /** Restrict provider selection strictly to free / local tiers */
+  freeOnly?: boolean;
 }
 
 export interface LLMCapabilities {
