@@ -202,7 +202,7 @@ export class ResearchEngine extends EventEmitter {
 
   private renderSnapshot(session: ResearchSession, steps: ResearchStep[], reason: string): string {
     const state = this.getResearchState(session.id);
-    if (state) return renderDeepReport(session.topic, state, reason);
+    if (state) return renderDeepReport(session.topic, state, reason, { final: session.status === 'completed' });
     const clean = (value: string) => value.replace(/[\r\n]+/g, ' ');
     const findings = session.findings.map(finding =>
       `- ${clean(finding.claim)} (${clean(finding.source)})${finding.url ? ` — ${finding.url}` : ''}`);
@@ -373,8 +373,11 @@ export class ResearchEngine extends EventEmitter {
         case 'deep_plan':
         case 'deep_search':
         case 'deep_open':
+        case 'deep_find_copy':
         case 'deep_review':
         case 'deep_verify':
+        case 'deep_synthesize':
+        case 'deep_check_briefing':
         case 'deep_publish':
           await this.deep.run(session, step, {
             signal: this.attempt!.controller.signal,

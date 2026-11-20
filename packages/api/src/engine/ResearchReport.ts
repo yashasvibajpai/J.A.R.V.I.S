@@ -1,4 +1,4 @@
-import type { DeepResearchState, ResearchClaim, ResearchSource } from '../stores/ResearchWorkspace.js';
+import type { DeepResearchState, ResearchBriefingPoint, ResearchClaim, ResearchSource } from '../stores/ResearchWorkspace.js';
 
 const inline = (value: string) => value.replace(/\s+/g, ' ').trim().replace(/[\\`*_[\]<>]/g, '\\$&');
 const labels: Record<ResearchClaim['verdict'], string> = {
@@ -6,7 +6,9 @@ const labels: Record<ResearchClaim['verdict'], string> = {
   'under-review': 'Under review', insufficient: 'Insufficient evidence',
 };
 
-export function renderDeepReport(topic: string, state: DeepResearchState, reason = 'Interim briefing · Research in progress'): string {
+export function renderDeepReport(
+  topic: string, state: DeepResearchState, reason = 'Interim briefing · Research in progress', options: { final?: boolean } = {},
+): string {
   const readable = state.sources.filter(source => !source.error && source.passages.length);
   const sources = new Map(readable.map(source => [source.id, source]));
   const used = new Map<string, { source: ResearchSource; number: number }>();
@@ -19,6 +21,8 @@ export function renderDeepReport(topic: string, state: DeepResearchState, reason
   };
   const findings = state.claims.filter(claim => claim.evidence.some(link => sources.has(link.sourceId)) &&
     claim.verdict !== 'insufficient');
+  const byId = new Map(findings.map(claim => [claim.id, claim]));
+  const briefing = options.final && state.synthesis?.status === 'ready' ? state.synthesis.briefing : undefined;
   const rank = (claim: ResearchClaim) => claim.verdict === 'corroborated' && claim.audit === 'checked' ? 0
     : claim.verdict === 'single-source' && claim.audit === 'checked' ? 1 : 2;
   const ordered = [...findings].sort((a, b) => rank(a) - rank(b));
@@ -27,6 +31,17 @@ export function renderDeepReport(topic: string, state: DeepResearchState, reason
     const links = [...new Set(claim.evidence.map(link => link.sourceId))].slice(0, 3).map(cite).filter(Boolean);
     const qualification = claim.audit === 'checked' ? labels[claim.verdict] : `${labels[claim.verdict]} · audit pending`;
     return `**${qualification}.** ${inline(claim.text)} ${links.join(' · ')}`.trimEnd();
+  };
+  const pointLine = (point: ResearchBriefingPoint, interpretation = false) => {
+    const claims = point.claimIds.flatMap(id => {
+      const claim = byId.get(id);
+      return claim ? [claim] : [];
+    });
+    const verdicts = new Set(claims.map(claim => claim.verdict));
+    const label = interpretation ? 'Interpretation' : verdicts.has('disputed') ? 'Disputed'
+      : verdicts.size > 1 ? 'Mixed evidence' : labels[claims[0]?.verdict ?? 'insufficient'];
+    const cited = [...new Set(claims.flatMap(claim => claim.evidence.map(link => link.sourceId)))].slice(0, 4);
+    return `> **${label}** ${inline(point.text)} ${cited.map(cite).filter(Boolean).join(' · ')}`.trimEnd();
   };
   const selected: ResearchClaim[] = [];
   const topics = new Set<string>();
@@ -42,15 +57,29 @@ export function renderDeepReport(topic: string, state: DeepResearchState, reason
     `> ${answered} of ${state.questions.length} questions answered · ${readable.length} readable sources · ${corroborated} audited corroborated findings`, '',
     '## Executive summary', '',
     ...(corroborated ? [] : ['The available evidence supports a preliminary account. No finding has both independent corroboration and a completed citation audit.', '']),
-    ...(selected.length ? selected.map(claim => `- ${claimLine(claim)}`) : ['There are no source-backed findings to summarize yet.']),
+    ...(briefing ? briefing.summary.flatMap(point => [pointLine(point), ''])
+      : selected.length ? selected.map(claim => `- ${claimLine(claim)}`) : ['There are no source-backed findings to summarize yet.']),
     '', '## Findings', '',
   ];
-  for (const question of state.questions) {
-    const claims = findings.filter(claim => claim.questionId === question.id);
-    if (!claims.length) continue;
-    const short = question.question.length > 105 ? `${question.question.slice(0, 105).replace(/\s+\S*$/, '')}…` : question.question;
-    lines.push(`### ${inline(short)}`, '');
-    for (const claim of claims) lines.push(claimLine(claim), '');
+  if (briefing) {
+    for (const section of briefing.sections) {
+      lines.push(`### ${inline(section.heading)}`, '', ...section.points.flatMap(point => [pointLine(point), '']));
+    }
+    if (briefing.implications.length) {
+      lines.push('## What the findings mean', '', ...briefing.implications.flatMap(point => [pointLine(point, true), '']));
+    }
+  } else {
+    if (options.final && findings.length) {
+      const explanation = state.synthesis?.status === 'unavailable' ? state.synthesis.reason : 'This run has no checked narrative.';
+      lines.push(`> Evidence digest · ${explanation}`, '');
+    }
+    for (const question of state.questions) {
+      const claims = findings.filter(claim => claim.questionId === question.id && (!options.final || !selected.includes(claim)));
+      if (!claims.length) continue;
+      const short = question.question.length > 105 ? `${question.question.slice(0, 105).replace(/\s+\S*$/, '')}…` : question.question;
+      lines.push(`### ${inline(short)}`, '');
+      for (const claim of options.final ? claims.slice(0, 2) : claims) lines.push(claimLine(claim), '');
+    }
   }
   if (!findings.length) lines.push('No substantive findings are ready to report.', '');
   lines.push('## Evidence and sources', '',
@@ -58,7 +87,7 @@ export function renderDeepReport(topic: string, state: DeepResearchState, reason
   for (const claim of findings) {
     lines.push(`- ${claim.id} · ${labels[claim.verdict]}${claim.supersededBy ? ` · corrected in ${claim.supersededBy}` : ''}`);
     for (const link of claim.evidence) {
-      if (sources.has(link.sourceId)) lines.push(`  - ${link.relation} · ${cite(link.sourceId)} · ${inline(link.locator)} · “${inline(link.quote)}”`);
+      if (sources.has(link.sourceId)) lines.push(`  - ${link.relation} · ${cite(link.sourceId)} · ${inline(link.locator)}${options.final ? '' : ` · “${inline(link.quote)}”`}`);
     }
   }
   if (used.size) {

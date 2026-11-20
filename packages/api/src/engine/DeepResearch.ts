@@ -1,12 +1,13 @@
 import { renderDeepReport } from './ResearchReport.js';
+import { briefingEvidence, briefingReview, checkBriefingDraft } from './ResearchSynthesis.js';
 import { randomUUID } from 'node:crypto';
 import type { Message } from '@jarvis/shared';
-import { canonicalResearchUrl, type ResearchSourceReader } from '../services/ResearchSourceReader.js';
+import { canonicalResearchUrl, researchPdfLimitMiB, ResearchSourceReadError, type ResearchSourceReader } from '../services/ResearchSourceReader.js';
 import type { WebSearchService } from '../services/WebSearchService.js';
 import type { FileService } from '../services/FileService.js';
 import type { SQLiteResearchStore, ResearchSession, ResearchStep, ResearchFinding } from '../stores/SQLiteResearchStore.js';
 import type {
-  DeepResearchState, ResearchQuestion, ResearchClaim, ResearchLens, ResearchInstruction, ResearchSource,
+  DeepResearchState, ResearchQuestion, ResearchClaim, ResearchLens, ResearchInstruction, ResearchSource, ResearchBriefing,
 } from '../stores/ResearchWorkspace.js';
 
 interface StepContext {
@@ -21,6 +22,24 @@ interface StepContext {
 const identifier = (prefix: string) => `${prefix}_${randomUUID().slice(0, 8)}`;
 const text = (value: unknown, limit = 450) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, limit) : '';
 const words = (value: string) => new Set((value.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? []));
+
+function copyTitle(value: string): string {
+  if (/^https?:\/\//i.test(value)) return '';
+  return text(value.replace(/^(?:\(PDF\)|PDF\s*[-:]?)\s+/i, '').split(/\s+[|–—]\s+/)[0], 175);
+}
+
+function researchDoi(url: string): string | undefined {
+  try {
+    return decodeURIComponent(new URL(url).pathname).match(/10\.\d{4,9}\/[\w.\-;()/:]+/i)?.[0].replace(/\.pdf$/i, '').toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function copyRecovery(source: ResearchSource): 'forbidden' | 'size_limit' | undefined {
+  if (source.failure === 'forbidden' || source.error === 'Source returned HTTP 403') return 'forbidden';
+  if (source.failure === 'size_limit' || source.error === 'Source exceeds the document size limit') return 'size_limit';
+}
 
 function similarity(a: string, b: string): number {
   const left = words(a);
@@ -75,6 +94,7 @@ export function applyResearchInstruction(state: DeepResearchState, kind: Researc
   question.noProgress = 0;
   question.tried = [];
   question.recoveryRoutes = [];
+  question.publicCopyAttempts = [];
   question.reason = undefined;
   const suppliedUrl = /https?:\/\/[^\s<>]+/.exec(subject)?.[0];
   question.nextQuery = suppliedUrl || text(target ? `${target.text} independent original evidence`
@@ -90,6 +110,7 @@ export function applyResearchInstruction(state: DeepResearchState, kind: Researc
   if (!existing) state.questions.push(question);
   state.instructions.push({ kind, text: subject, questionId: question.id, submittedAt: new Date().toISOString() });
   state.stopReason = undefined;
+  state.synthesis = undefined;
   return question;
 }
 
@@ -116,6 +137,7 @@ export class DeepResearch {
         branch.status = 'open';
         branch.noProgress = 0;
         branch.recoveryRoutes = [];
+        branch.publicCopyAttempts = [];
         branch.closure = undefined;
         branch.nextQuery = `${branch.question} updated independent original records`;
       }
@@ -133,8 +155,11 @@ export class DeepResearch {
       case 'deep_plan': await this.plan(session, state, context); break;
       case 'deep_search': await this.searchQuestion(session, step, state, context); break;
       case 'deep_open': await this.openSource(session, step, state, context); break;
+      case 'deep_find_copy': await this.findPublicCopy(session, step, state, context); break;
       case 'deep_review': await this.review(session, step, state, context); break;
       case 'deep_verify': await this.verify(session, step, state, context); break;
+      case 'deep_synthesize': await this.synthesize(session, step, state, context); break;
+      case 'deep_check_briefing': await this.checkSynthesis(session, step, state, context); break;
       case 'deep_publish': await this.publish(session, step, state, context); break;
     }
   }
@@ -189,7 +214,10 @@ export class DeepResearch {
       const cached = [...state.sources].reverse().find(source => source.url === url || source.requestedUrl === url);
       const retryUnavailablePdf = cached?.error?.includes('pdftotext') &&
         !state.sources.some(source => source.requestedUrl === url && source.id !== cached.id && !source.error);
-      if (cached && !retryUnavailablePdf && !seed && !(question.claimId && !question.tried.length)) {
+      const legacySizeLimit = cached?.error === 'Source exceeds the document size limit';
+      const oldPdfLimit = cached?.error?.match(/^PDF exceeds the (\d+) MiB download limit$/)?.[1];
+      const raisedPdfLimit = oldPdfLimit && Number(oldPdfLimit) < researchPdfLimitMiB();
+      if (cached && !retryUnavailablePdf && !legacySizeLimit && !raisedPdfLimit && !seed && !(question.claimId && !question.tried.length)) {
         this.linkSource(question, cached.id);
       } else {
         opens.push({ title: text(result.title, 250), url });
@@ -228,14 +256,18 @@ export class DeepResearch {
 
   private async openSource(session: ResearchSession, step: ResearchStep, state: DeepResearchState, context: StepContext): Promise<void> {
     const question = this.branch(state, step);
-    const { url, title } = step.evidence as { url: string; title: string };
+    const { url, title, alternativeFor } = step.evidence as { url: string; title: string; alternativeFor?: string };
+    const original = state.sources.find(item => item.id === alternativeFor);
     let source: ResearchSource;
     try {
-      source = { ...await this.reader.open(url, title, context.signal), id: identifier('src'), requestedUrl: url };
+      source = { ...await this.reader.open(url, title, context.signal), id: identifier('src'), requestedUrl: url, alternativeFor };
+      if (original) source.family = original.family.toLowerCase().replace(/^(www\.|m\.)/, '');
     } catch (error) {
       context.signal.throwIfAborted();
       source = {
-        id: identifier('src'), url, requestedUrl: url, title: title || url, family: new URL(url).hostname, passages: [],
+        id: identifier('src'), url, requestedUrl: url, title: title || url,
+        family: original?.family ?? new URL(url).hostname.toLowerCase().replace(/^(www\.|m\.)/, ''), passages: [],
+        alternativeFor, failure: error instanceof ResearchSourceReadError ? error.failure : undefined,
         retrievedAt: new Date().toISOString(), error: text(error instanceof Error ? error.message : String(error), 240),
       };
     }
@@ -244,7 +276,52 @@ export class DeepResearch {
     this.linkSource(question, prior?.id ?? source.id);
     context.checkpoint(() => {
       this.save(session, state);
-      this.store.updateStep(step.id, { evidence: { questionId: question.id, sourceId: prior?.id ?? source.id, passages: source.passages.length, error: source.error } });
+      this.store.updateStep(step.id, { evidence: { questionId: question.id, sourceId: prior?.id ?? source.id,
+        passages: source.passages.length, error: source.error, failure: source.failure, alternativeFor } });
+    });
+  }
+
+  private async findPublicCopy(session: ResearchSession, step: ResearchStep, state: DeepResearchState, context: StepContext): Promise<void> {
+    const question = this.branch(state, step);
+    const source = state.sources.find(item => item.id === step.evidence?.sourceId);
+    if (!source) throw new Error('Original source is missing');
+    const query = step.query ?? source.title;
+    let results: Awaited<ReturnType<WebSearchService['search']>> = [];
+    let searchError: string | undefined;
+    try {
+      results = await this.search.search(query, 8, {
+        signal: AbortSignal.any([context.signal, AbortSignal.timeout(60_000)]), warn: context.log,
+      });
+    } catch (error) {
+      context.signal.throwIfAborted();
+      searchError = text(error instanceof Error ? error.message : String(error), 240);
+    }
+    const originalHost = new URL(source.url).hostname.replace(/^(www\.|m\.)/, '');
+    const title = copyTitle(source.title);
+    const doi = researchDoi(source.url);
+    const candidates = new Map<string, string>();
+    for (const result of results) {
+      let url: string;
+      try { url = canonicalResearchUrl(result.url); } catch { continue; }
+      if (state.sources.some(item => item.url === url || item.requestedUrl === url)) continue;
+      if (copyRecovery(source) === 'forbidden' && new URL(url).hostname.replace(/^(www\.|m\.)/, '') === originalHost) continue;
+      const candidateTitle = copyTitle(result.title);
+      if (!(doi && researchDoi(url) === doi) &&
+        (!title || (candidateTitle.toLowerCase() !== title.toLowerCase() && similarity(candidateTitle, title) < 0.65))) continue;
+      candidates.set(url, candidateTitle || url);
+      if (candidates.size === 2) break;
+    }
+    question.publicCopyAttempts = [...(question.publicCopyAttempts ?? []), source.id];
+    context.checkpoint(() => {
+      this.save(session, state);
+      this.store.updateStep(step.id, { evidence: {
+        questionId: question.id, sourceId: source.id, candidates: candidates.size,
+        reason: searchError ? `Public-copy search failed: ${searchError}` : `Public-copy search found ${candidates.size} matching candidate(s).`,
+      } });
+      for (const [url, title] of candidates) {
+        this.store.enqueueStep(session.id, 'deep_open', `Read public copy · ${title}`, { url, title, questionId: question.id, alternativeFor: source.id });
+      }
+      this.store.enqueueStep(session.id, 'deep_review', `Review evidence · ${question.question}`, { questionId: question.id });
     });
   }
 
@@ -261,6 +338,22 @@ export class DeepResearch {
         this.store.enqueueStep(session.id, 'deep_review', `Review evidence · ${question.question}`, { questionId: question.id });
       });
       return;
+    }
+    // Retry discovery, not the rejected request. Copies stay in the original evidence family.
+    if ((new Set(sources.map(source => source.family)).size < 2 || (question.noProgress ?? 0) > 0) &&
+      (question.publicCopyAttempts?.length ?? 0) < 3) {
+      const candidate = (question.sourceIds ?? []).map(id => state.sources.find(item => item.id === id))
+        .find(item => item && !item.alternativeFor && copyRecovery(item) &&
+          !question.publicCopyAttempts?.includes(item.id) && (researchDoi(item.url) || copyTitle(item.title)));
+      if (candidate) {
+        const key = researchDoi(candidate.url) || copyTitle(candidate.title);
+        const query = `"${key.replace(/"/g, '')}" ${copyRecovery(candidate) === 'size_limit' ? 'official HTML full text' : 'open access repository full text'}`;
+        context.checkpoint(() => {
+          this.store.updateStep(step.id, { evidence: { questionId: question.id, reason: `Looking for a public copy of ${candidate.id}.` } });
+          this.store.enqueueStep(session.id, 'deep_find_copy', `Find a public copy · ${candidate.title}`, { questionId: question.id, sourceId: candidate.id }, query);
+        });
+        return;
+      }
     }
     const terms = words(question.question);
     const relevance = (value: string) => [...words(value)].filter(word => terms.has(word)).length;
@@ -412,8 +505,63 @@ export class DeepResearch {
     } else {
       const pending = state.claims.filter(claim => !claim.audit && claim.evidence.length).slice(0, 6).map(claim => claim.id);
       if (pending.length) this.store.enqueueStep(session.id, 'deep_verify', 'Audit claim wording and source citations', { claimIds: pending });
+      else if (!state.synthesis && briefingEvidence(state).length) {
+        this.store.enqueueStep(session.id, 'deep_synthesize', 'Write a briefing from the audited evidence');
+      } else if (state.synthesis?.status === 'draft') {
+        this.store.enqueueStep(session.id, 'deep_check_briefing', 'Check the briefing against the audited evidence');
+      }
       else this.store.enqueueStep(session.id, 'deep_publish', 'Publish evidence and open questions');
     }
+  }
+
+  private async synthesize(session: ResearchSession, step: ResearchStep, state: DeepResearchState, context: StepContext): Promise<void> {
+    const evidence = briefingEvidence(state);
+    let briefing: ResearchBriefing | undefined;
+    let reason = 'The writer returned no usable cited narrative.';
+    try {
+      const result = parseObject(await context.ask(modelPrompt(
+        'Write a coherent research briefing for a reader who has not seen the evidence ledger. Answer the topic directly and organize the findings by theme or period. Synthesize related findings into connected paragraphs with descriptive headings. Distinguish reported views, dated evidence, and interpretation. Preserve uncertainty, dates, scope, and disagreements. Only use supplied claims. Never invent facts, citations, or links. Cite claim IDs for every paragraph. Do not copy quotations or reprint the ledger. Provide up to three short summary points, up to five sections, and implications only when the evidence supports them. Schema: {"summary":[{"text":"...","claimIds":["claim_id"]}],"sections":[{"heading":"...","points":[{"text":"...","claimIds":["claim_id"]}]}],"implications":[{"text":"...","claimIds":["claim_id"]}]}',
+        { topic: session.topic, evidence, gaps: state.questions.filter(question => question.status !== 'answered')
+          .map(question => question.question) },
+      )));
+      briefing = checkBriefingDraft(result, evidence);
+    } catch {
+      context.ensureCurrent();
+      reason = 'The synthesis call was unavailable under the current provider limits.';
+    }
+    state.synthesis = briefing ? { status: 'draft', briefing } : { status: 'unavailable', reason };
+    context.checkpoint(() => {
+      this.store.updateStep(step.id, { evidence: { reason: briefing ? 'Drafted a thematic briefing with claim-linked paragraphs.' : reason } });
+      this.next(session, state);
+    });
+  }
+
+  private async checkSynthesis(session: ResearchSession, step: ResearchStep, state: DeepResearchState, context: StepContext): Promise<void> {
+    const draft = state.synthesis?.status === 'draft' ? state.synthesis.briefing : undefined;
+    if (!draft) throw new Error('The briefing draft is missing');
+    const paragraphs = [
+      ...draft.summary.map((point, i) => ({ id: `summary.${i}`, ...point })),
+      ...draft.sections.flatMap((section, i) => section.points.map((point, j) => ({ id: `section.${i}.${j}`, heading: section.heading, ...point }))),
+      ...draft.implications.map((point, i) => ({ id: `implication.${i}`, ...point })),
+    ];
+    let briefing: ResearchBriefing | undefined;
+    let reason = 'The narrative could not be validated against its cited claims.';
+    try {
+      const result = parseObject(await context.ask(modelPrompt(
+        'Audit the briefing prose against the claims it actually cites. Accept a paragraph only if every concrete assertion, number, date, and attribution follows from its cited evidence, qualifications are preserved, and interpretations are clearly marked. If a heading makes an unsupported assertion, reject its paragraphs. Return {"accepted":["paragraph.id"]} for paragraphs that pass. Never create replacement text.',
+        { evidence: briefingEvidence(state), paragraphs },
+      )));
+      const accepted = Array.isArray(result.accepted) ? result.accepted.filter(id => typeof id === 'string') : [];
+      briefing = briefingReview(draft, new Set(accepted));
+    } catch {
+      context.ensureCurrent();
+      reason = 'The briefing check was unavailable under the current provider limits.';
+    }
+    state.synthesis = briefing ? { status: 'ready', briefing } : { status: 'unavailable', reason };
+    context.checkpoint(() => {
+      this.store.updateStep(step.id, { evidence: { reason: briefing ? 'Checked the briefing prose against the cited evidence.' : reason } });
+      this.next(session, state);
+    });
   }
 
   private async verify(session: ResearchSession, step: ResearchStep, state: DeepResearchState, context: StepContext): Promise<void> {
@@ -478,7 +626,7 @@ export class DeepResearch {
     const reason = gaps ? 'Research finished with open questions after useful search paths were exhausted.'
       : 'Research finished after priority questions were answered and promising leads were reviewed.';
     state.stopReason = reason;
-    const markdown = renderDeepReport(session.topic, state, reason);
+    const markdown = renderDeepReport(session.topic, state, reason, { final: true });
     const name = `Research_${session.id}_${step.id}`;
     context.ensureCurrent();
     const report = await this.files.createMarkdown(name, markdown);

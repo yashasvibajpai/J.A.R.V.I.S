@@ -2,26 +2,31 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import type { Message } from '@jarvis/shared';
 import { ResearchEngine } from '../src/engine/ResearchEngine.js';
 import type { SmartRouter } from '../src/engine/SmartRouter.js';
 import { FileService } from '../src/services/FileService.js';
-import { canonicalResearchUrl } from '../src/services/ResearchSourceReader.js';
+import { canonicalResearchUrl, collectResearchDocument, ResearchSourceReadError } from '../src/services/ResearchSourceReader.js';
 import type { WebSearchService } from '../src/services/WebSearchService.js';
 import { SQLiteResearchStore } from '../src/stores/SQLiteResearchStore.js';
 
-async function fixture(context: { after: (callback: () => Promise<void>) => void }, model: (messages: Message[]) => Promise<string>, withSources = true) {
+async function fixture(context: { after: (callback: () => Promise<void>) => void }, model: (messages: Message[]) => Promise<string>, withSources = true,
+  overrides?: { search?: (query: string) => Promise<{ url: string; title: string }[]>; rejectSource?: (url: string) => void },
+) {
   const directory = await mkdtemp(join(tmpdir(), 'jarvis-deep-'));
   const store = new SQLiteResearchStore(join(directory, 'research.db'));
   const search = {
-    search: async (query: string) => withSources ? [
+    search: overrides?.search ?? (async (query: string) => withSources ? [
       { url: `https://official.example/${encodeURIComponent(query)}`, title: 'Primary record' },
       { url: `https://registry.example/${encodeURIComponent(query)}`, title: 'Independent registry' },
-    ] : [],
+    ] : []),
   } as unknown as WebSearchService;
   const reader = {
     open: async (url: string, title: string) => {
+      overrides?.rejectSource?.(url);
       const family = new URL(url).hostname;
       const text = family.startsWith('official')
         ? 'The commissioning record identifies the factory as actively producing commercial units.'
@@ -48,6 +53,22 @@ async function model(messages: Message[]): Promise<string> {
   if (messages[0].content.startsWith('Independently')) {
     return JSON.stringify({ audits: input.map((claim: { id: string; evidence: { index: number }[] }) =>
       ({ claimId: claim.id, validLinks: claim.evidence.map(link => link.index) })) });
+  }
+  if (messages[0].content.startsWith('Write a coherent research briefing')) {
+    const ids = input.evidence.map((claim: { id: string }) => claim.id);
+    return JSON.stringify({
+      summary: [{ text: 'Independent records connect commissioning to continued operation.', claimIds: ids.slice(0, 2) }],
+      sections: [{ heading: 'Commissioning and continued operation', points: [
+        { text: 'The records examine operating status from different perspectives, which strengthens the account of commercial activity.', claimIds: ids.slice(0, 2) },
+        { text: 'An invented citation should be discarded.', claimIds: ['claim_invented'] },
+        { text: 'An unverified inference should be discarded.', claimIds: ids.slice(0, 1) },
+        { text: input.evidence[0].text, claimIds: ids.slice(0, 1) },
+      ] }],
+      implications: [{ text: 'Operating records offer a starting point for comparing industrial activity across sources.', claimIds: ids.slice(0, 2) }],
+    });
+  }
+  if (messages[0].content.startsWith('Audit the briefing prose')) {
+    return JSON.stringify({ accepted: ['summary.0', 'section.0.0', 'implication.0'] });
   }
   const evidence = input.passages.slice(0, 2).map((passage: { sourceId: string; locator: string; text: string }) => ({
     sourceId: passage.sourceId, locator: passage.locator, quote: passage.text, relation: 'supports',
@@ -80,12 +101,33 @@ test('deep research audits original citations, rejects fabricated links, and pub
   assert.equal(state.claims.length, 3);
   assert(state.claims.every(claim => claim.verdict === 'corroborated' && claim.audit === 'checked' && claim.evidence.length === 2));
   assert(!finished.finalReport?.includes('src_invented'));
+  const narrative = finished.finalReport!.split('## Evidence and sources')[0];
+  assert.match(narrative, /### Commissioning and continued operation/);
+  assert.match(narrative, /The records examine operating status from different perspectives/);
+  assert.doesNotMatch(narrative, /Commercial operation was documented for|should be discarded/);
+  assert.match(narrative, /What the findings mean/);
+  const [reExported] = await engine.exportResearchReport(mission.id);
+  assert.match(await readFile(reExported, 'utf8'), /### Commissioning and continued operation/);
   assert(finished.finalReport!.indexOf('## Executive summary') < finished.finalReport!.indexOf('## Evidence and sources'));
   assert.equal(finished.finalReport!.match(/^## .+$/gm)?.at(-1), '## Pending research areas');
   assert.match(await readFile(finished.reportPath!, 'utf8'), /Section 1/);
   const pdf = await readFile(finished.pdfPath!, 'latin1');
   assert(pdf.startsWith('%PDF-'));
   assert.match(pdf, /\/Subtype \/Link/);
+  assert.match(pdf, /CORROBORATED|INTERPRETATION/);
+  assert.match(pdf, /0\.88 0\.95 0\.91 rg/);
+});
+
+test('an unavailable briefing writer still publishes an explicitly labeled evidence digest', async context => {
+  const { engine, tick } = await fixture(context, async messages => {
+    if (messages[0].content.startsWith('Write a coherent')) throw new Error('Provider unavailable');
+    return model(messages);
+  });
+  const mission = await engine.startMission('Evidence fallback', 'deep');
+  engine.stop();
+  const finished = await runToEnd(engine, mission.id, tick);
+  assert.match(finished.finalReport!, /Evidence digest/);
+  assert.match(finished.finalReport!, /Pending research areas/);
 });
 
 test('the planner finishes with disclosed gaps when no source yields evidence', async context => {
@@ -183,6 +225,49 @@ test('original-document retrieval rejects private addresses and strips tracking 
     assert.throws(() => canonicalResearchUrl(url));
   }
   assert.equal(canonicalResearchUrl('https://example.org/a?utm_source=copy#x'), 'https://example.org/a');
+});
+
+test('large PDFs stream to disk and enforce the byte cap without a content length', async context => {
+  const signal = new AbortController().signal;
+  const megabyte = Buffer.alloc(1024 * 1024);
+  const header = [Buffer.from('%P'), Buffer.from('DF-1.4\n')];
+  const result = await collectResearchDocument(Readable.from([...header, ...Array(9).fill(megabyte)]),
+    'application/octet-stream', NaN, signal);
+  assert('pdfPath' in result);
+  context.after(() => rm(result.directory, { recursive: true, force: true }));
+  assert.equal((await stat(result.pdfPath)).size, header.reduce((total, chunk) => total + chunk.length, 0) + 9 * megabyte.length);
+  assert.match(result.hash, /^[a-f0-9]{64}$/);
+  await assert.rejects(collectResearchDocument(Readable.from([...header, megabyte]), 'application/pdf', NaN, signal, megabyte.length),
+    (error: unknown) => error instanceof ResearchSourceReadError && error.failure === 'size_limit' && /PDF/.test(error.message));
+  await assert.rejects(collectResearchDocument(Readable.from(Array(9).fill(megabyte)), 'text/html', NaN, signal),
+    /Web document exceeds the 8 MiB download limit/);
+});
+
+test('a forbidden source leads to a public-copy lookup without counting the copy as independent', async context => {
+  const original = 'https://publisher.example/original';
+  const publicCopy = 'https://repository.example/public-copy';
+  const title = 'A chronology of regional industrial production';
+  const { engine, tick } = await fixture(context, model, true, {
+    search: async query => query.includes('open access repository') ? [
+      { url: 'https://publisher.example/alternate', title },
+      { url: 'https://repository.example/unrelated', title: 'An unrelated source' },
+      { url: publicCopy, title },
+    ] : [{ url: original, title }],
+    rejectSource: url => {
+      if (url === original) throw new ResearchSourceReadError('forbidden', 'Source returned HTTP 403');
+    },
+  });
+  const mission = await engine.startMission('Regional production', 'deep');
+  engine.stop();
+  for (let i = 0; i < 8; i++) await tick();
+  const state = engine.getResearchState(mission.id)!;
+  const failed = state.sources.find(source => source.url === original)!;
+  const recovered = state.sources.find(source => source.url === publicCopy)!;
+  assert.equal(failed.failure, 'forbidden');
+  assert.equal(recovered.alternativeFor, failed.id);
+  assert.equal(recovered.family, failed.family);
+  assert(!state.sources.some(source => source.url.endsWith('/unrelated') || source.url.endsWith('/alternate')));
+  assert.match(await engine.diagnoseMission(mission.id), /1 readable alternatives/);
 });
 
 test('paused research can publish a styled briefing without changing mission state', async context => {

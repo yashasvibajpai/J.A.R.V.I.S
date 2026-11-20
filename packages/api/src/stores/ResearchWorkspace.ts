@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 export type ResearchLens = 'breadth' | 'depth' | 'tangent';
 export type ClaimVerdict = 'single-source' | 'corroborated' | 'disputed' | 'under-review' | 'insufficient';
+export type SourceFailure = 'forbidden' | 'size_limit' | 'access_required' | 'no_pdf_text';
 
 export interface ResearchQuestion {
   id: string;
@@ -17,6 +18,7 @@ export interface ResearchQuestion {
   noProgress?: number;
   nextQuery?: string;
   recoveryRoutes?: string[];
+  publicCopyAttempts?: string[];
   closure?: string;
   reason?: string;
   claimId?: string;
@@ -31,6 +33,8 @@ export interface ResearchSource {
   hash?: string;
   requestedUrl?: string;
   error?: string;
+  failure?: SourceFailure;
+  alternativeFor?: string;
   passages: { locator: string; text: string }[];
 }
 
@@ -60,6 +64,18 @@ export interface DeepResearchState {
   instructions: ResearchInstruction[];
   briefingId?: string;
   stopReason?: string;
+  synthesis?: { status: 'draft' | 'ready'; briefing: ResearchBriefing } | { status: 'unavailable'; reason: string };
+}
+
+export interface ResearchBriefingPoint {
+  text: string;
+  claimIds: string[];
+}
+
+export interface ResearchBriefing {
+  summary: ResearchBriefingPoint[];
+  sections: { heading: string; points: ResearchBriefingPoint[] }[];
+  implications: ResearchBriefingPoint[];
 }
 
 export interface ResearchDocument {

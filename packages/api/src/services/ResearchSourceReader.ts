@@ -1,15 +1,94 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createWriteStream, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lookup } from 'node:dns';
 import { request, type RequestOptions } from 'node:http';
 import { request as secureRequest } from 'node:https';
 import { BlockList, isIP } from 'node:net';
-import type { ResearchSource } from '../stores/ResearchWorkspace.js';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ResearchSource, SourceFailure } from '../stores/ResearchWorkspace.js';
 
-const maxBytes = 8 * 1024 * 1024;
+const mib = 1024 * 1024;
+const htmlLimit = 8 * mib;
+const defaultPdfLimit = 32;
+
+export class ResearchSourceReadError extends Error {
+  constructor(readonly failure: SourceFailure, message: string) { super(message); }
+}
+
+export function researchPdfLimitMiB(): number {
+  const setting = process.env.JARVIS_RESEARCH_PDF_MAX_MIB?.trim();
+  const value = setting ? Number(setting) : defaultPdfLimit;
+  if (!Number.isInteger(value) || value < 1 || value > 128) {
+    throw new Error('JARVIS_RESEARCH_PDF_MAX_MIB must be a whole number from 1 to 128');
+  }
+  return value;
+}
+
+type DownloadedDocument = { body: Buffer; hash: string }
+  | { pdfPath: string; directory: string; hash: string };
+
+export async function collectResearchDocument(
+  response: Readable, type: string, length: number, signal: AbortSignal, maxPdfBytes = researchPdfLimitMiB() * mib,
+): Promise<DownloadedDocument> {
+  const tooLarge = (format: string, limit: number) =>
+    new ResearchSourceReadError('size_limit', `${format} exceeds the ${limit / mib} MiB download limit`);
+  const declaredPdf = /application\/pdf/i.test(type);
+  if (declaredPdf && length > maxPdfBytes) throw tooLarge('PDF', maxPdfBytes);
+  const chunks = response[Symbol.asyncIterator]();
+  const prefix: Buffer[] = [];
+  let size = 0;
+  while (size < 8) {
+    signal.throwIfAborted();
+    const next = await chunks.next();
+    if (next.done) break;
+    const chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
+    size += chunk.length;
+    prefix.push(chunk);
+  }
+  const pdf = declaredPdf || Buffer.concat(prefix, Math.min(size, 8)).subarray(0, 5).toString() === '%PDF-';
+  const limit = pdf ? maxPdfBytes : htmlLimit;
+  const format = pdf ? 'PDF' : 'Web document';
+  if (!pdf && type && !/text\/(?:html|plain)|application\/xhtml\+xml/i.test(type)) {
+    throw new Error('Unsupported source content type');
+  }
+  if (length > limit) throw tooLarge(format, limit);
+
+  const hash = createHash('sha256');
+  async function* boundedChunks() {
+    let total = 0;
+    const checked = (chunk: Buffer) => {
+      signal.throwIfAborted();
+      total += chunk.length;
+      if (total > limit) throw tooLarge(format, limit);
+      hash.update(chunk);
+      return chunk;
+    };
+    for (const chunk of prefix) yield checked(chunk);
+    for (let next = await chunks.next(); !next.done; next = await chunks.next()) {
+      yield checked(Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value));
+    }
+  }
+
+  if (pdf) {
+    const directory = await mkdtemp(join(tmpdir(), 'jarvis-source-pdf-'));
+    const pdfPath = join(directory, 'source.pdf');
+    try {
+      await pipeline(Readable.from(boundedChunks()), createWriteStream(pdfPath, { mode: 0o600 }), { signal });
+      return { pdfPath, directory, hash: hash.digest('hex') };
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  const body: Buffer[] = [];
+  for await (const chunk of boundedChunks()) body.push(chunk);
+  return { body: Buffer.concat(body), hash: hash.digest('hex') };
+}
 let swiftModuleCache: string | undefined;
 const privateNetworks = new BlockList();
 for (const [address, prefix] of [
@@ -44,9 +123,10 @@ export function canonicalResearchUrl(input: string): string {
   return url.toString();
 }
 
-function download(url: string, signal: AbortSignal): Promise<{ type: string; body: Buffer } | { redirect: string }> {
+function download(url: string, signal: AbortSignal): Promise<DownloadedDocument | { redirect: string }> {
   return new Promise((resolve, reject) => {
     const get = url.startsWith('https:') ? secureRequest : request;
+    let receivedResponse = false;
     const options: RequestOptions & { autoSelectFamily: boolean } = {
       method: 'GET', signal, agent: false, autoSelectFamily: false,
       headers: { 'User-Agent': 'JARVIS Research/1.0', Accept: 'text/html,text/plain,application/pdf' },
@@ -59,6 +139,7 @@ function download(url: string, signal: AbortSignal): Promise<{ type: string; bod
       },
     };
     const req = get(url, options, response => {
+      receivedResponse = true;
       const status = response.statusCode ?? 0;
       if (status >= 300 && status < 400 && response.headers.location) {
         response.destroy();
@@ -68,25 +149,19 @@ function download(url: string, signal: AbortSignal): Promise<{ type: string; bod
       }
       if (status !== 200) {
         response.destroy();
-        reject(new Error(`Source returned HTTP ${status}`));
+        const message = `Source returned HTTP ${status}`;
+        reject(status === 403 ? new ResearchSourceReadError('forbidden', message)
+          : [401, 402].includes(status) ? new ResearchSourceReadError('access_required', message) : new Error(message));
         return;
       }
-      if (Number(response.headers['content-length']) > maxBytes) {
-        response.destroy();
-        reject(new Error('Source exceeds the document size limit'));
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let size = 0;
-      response.on('error', reject);
-      response.on('data', (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > maxBytes) response.destroy(new Error('Source exceeds the document size limit'));
-        else chunks.push(chunk);
-      });
-      response.on('end', () => resolve({ type: response.headers['content-type'] ?? '', body: Buffer.concat(chunks) }));
+      void collectResearchDocument(response, response.headers['content-type'] ?? '', Number(response.headers['content-length']), signal)
+        .then(resolve, error => {
+          response.destroy();
+          reject(error);
+        });
     });
-    req.on('error', reject);
+    req.on('error', error => { if (!receivedResponse) reject(error); });
+    req.setTimeout(20_000, () => req.destroy(new Error('Source download made no progress for 20 seconds')));
     req.end();
   });
 }
@@ -100,24 +175,27 @@ function cleanText(value: string): string {
   }).replace(/\s+/g, ' ').trim();
 }
 
-export function readResearchPdf(body: Buffer, signal: AbortSignal): Promise<string> {
+export function readResearchPdf(input: Buffer | string, signal: AbortSignal): Promise<string> {
   const extract = (program: string, args: string[], timeout: number, env?: NodeJS.ProcessEnv): Promise<string> => new Promise((resolve, reject) => {
     const child = execFile(program, args, { signal, timeout, env, maxBuffer: 600_000 }, (error, stdout) => {
       if (error) reject(error);
       else resolve(stdout);
     });
     child.stdin?.on('error', () => { /* execFile reports conversion or spawn failure */ });
-    child.stdin?.end(body);
+    child.stdin?.end(typeof input === 'string' ? undefined : input);
   });
-  return extract('pdftotext', ['-f', '1', '-l', '60', '-layout', '-', '-'], 12_000).catch(async error => {
+  return extract('pdftotext', ['-f', '1', '-l', '60', '-layout', typeof input === 'string' ? input : '-', '-'], 12_000).catch(async error => {
     signal.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('PDF text could not be extracted');
     if (process.platform !== 'darwin') throw new Error('PDF text requires pdftotext from Poppler');
     const decoder = `
 import Foundation
 import PDFKit
-let input = FileHandle.standardInput.readDataToEndOfFile()
-guard let document = PDFDocument(data: input) else { exit(1) }
+let path = ProcessInfo.processInfo.environment["JARVIS_PDFKIT_SOURCE_FILE"] ?? ""
+let document = path.isEmpty
+    ? PDFDocument(data: FileHandle.standardInput.readDataToEndOfFile())
+    : PDFDocument(url: URL(fileURLWithPath: path))
+guard let document else { exit(1) }
 for i in 0..<min(document.pageCount, 60) {
     if i != 0 { print("\\u{000C}", terminator: "") }
     print(document.page(at: i)?.string ?? "", terminator: "")
@@ -133,6 +211,7 @@ for i in 0..<min(document.pageCount, 60) {
       }
       return await extract('/usr/bin/swift', ['-module-cache-path', swiftModuleCache, '-e', decoder], 55_000, {
         ...process.env, CLANG_MODULE_CACHE_PATH: swiftModuleCache,
+        JARVIS_PDFKIT_SOURCE_FILE: typeof input === 'string' ? input : '',
       });
     } catch {
       signal.throwIfAborted();
@@ -162,24 +241,34 @@ function passagesFromHtml(html: string): ResearchSource['passages'] {
 export class ResearchSourceReader {
   async open(address: string, title: string, signal: AbortSignal): Promise<Omit<ResearchSource, 'id'>> {
     let url = canonicalResearchUrl(address);
-    const deadline = AbortSignal.any([signal, AbortSignal.timeout(25_000)]);
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
     for (let redirects = 0; redirects < 5; redirects++) {
       const result = await download(url, deadline);
       if ('redirect' in result) {
         url = canonicalResearchUrl(result.redirect);
         continue;
       }
-      const { body, type } = result;
-      const pdf = /application\/pdf/i.test(type) || body.subarray(0, 5).toString() === '%PDF-';
-      if (!pdf && type && !/text\/(?:html|plain)|application\/xhtml\+xml/i.test(type)) {
-        throw new Error('Unsupported source content type');
+      const pdf = 'pdfPath' in result;
+      let text: string;
+      if (pdf) {
+        try {
+          text = await readResearchPdf(result.pdfPath, AbortSignal.any([signal, AbortSignal.timeout(75_000)]));
+        } finally {
+          await rm(result.directory, { recursive: true, force: true });
+        }
+      } else {
+        text = result.body.toString('utf8');
+        if (/"isAccessibleForFree"\s*:\s*(?:false|"false")(?=\s*[,}])/i.test(text)) {
+          throw new ResearchSourceReadError('access_required', 'The page identifies the full text as access restricted');
+        }
       }
-      const text = pdf ? await readResearchPdf(body, AbortSignal.any([signal, AbortSignal.timeout(75_000)])) : body.toString('utf8');
       const passages = pdf ? text.split('\f').flatMap((page, index) => {
         const parts = cleanText(page).match(/.{1,1800}(?:\s|$)/g) ?? [];
         return parts.map((part, offset) => ({ locator: `Page ${index + 1} · passage ${offset + 1}`, text: part.trim() }));
       }).slice(0, 80) : passagesFromHtml(text);
-      if (!passages.length) throw new Error('No readable text was retrieved');
+      if (!passages.length) throw pdf
+        ? new ResearchSourceReadError('no_pdf_text', 'No usable text was extracted from the sampled PDF pages. Scanned pages may require OCR')
+        : new Error('No readable text was retrieved');
       const canonicalTag = pdf ? undefined : text.match(/<link\b[^>]*>/gi)
         ?.find(tag => /\brel\s*=\s*['"]canonical['"]/i.test(tag));
       const canonical = canonicalTag?.match(/\bhref\s*=\s*(['"])(.*?)\1/i)?.[2];
@@ -191,7 +280,7 @@ export class ResearchSourceReader {
       return {
         url, title: title || cleanText(/<title\b[^>]*>([^]*?)<\/title>/i.exec(text)?.[1] ?? '') || url,
         family: family.toLowerCase().replace(/^(www\.|m\.)/, ''),
-        retrievedAt: new Date().toISOString(), hash: createHash('sha256').update(body).digest('hex'), passages,
+        retrievedAt: new Date().toISOString(), hash: result.hash, passages,
       };
     }
     throw new Error('Source redirect limit exceeded');

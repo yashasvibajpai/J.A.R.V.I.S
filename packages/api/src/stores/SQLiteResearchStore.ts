@@ -20,7 +20,8 @@ export interface ResearchStep {
   sessionId: string;
   stepNumber: number;
   stepType: 'decompose' | 'search_explore' | 'fact_check' | 'synthesize'
-    | 'deep_plan' | 'deep_search' | 'deep_open' | 'deep_review' | 'deep_verify' | 'deep_publish';
+    | 'deep_plan' | 'deep_search' | 'deep_open' | 'deep_find_copy' | 'deep_review' | 'deep_verify'
+    | 'deep_synthesize' | 'deep_check_briefing' | 'deep_publish';
   title: string;
   query?: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'superseded';

@@ -164,9 +164,68 @@ pnpm jarvis "What's the latest on Iran?"
 - Use `/research steer <id> focus on <area>` or `/research explore <id> <related question>` to change direction. Use `/research fact-check <id> <claim-id> [source URL or correction]` to reopen a finding.
 - Open `/research doc help` for a tabbed guide with command examples for creating, editing, and exporting research documents. Use Tab or the arrow keys to switch tabs and Esc to return. Revisions can be exported as Markdown and PDF, and `/research doc bundle <id>` saves the research ledger and document history as JSON.
 - Use `/research publish <id>` to export a briefing from a paused, stopped, or completed mission. This leaves the mission state as it is. The report ends with pending research areas.
+- On completion, deep research assembles audited findings into a thematic briefing and checks the new prose against its citations. The PDF uses colored evidence labels and linked references. If prose synthesis or review is unavailable, the report includes a labeled evidence digest.
 - Use `/research diagnose <id>` for retrieval failures, question stop decisions, and per-call timing and provider errors. Set `JARVIS_RESEARCH_TRACE=true` before starting the worker to capture full prompts and responses locally, then use `/research diagnose <id> --trace`.
 
 Research requires a configured free model provider. Configure account-specific model and search limits in `.env` where needed. Report export uses the built-in PDF renderer. For PDF text extraction, JARVIS uses Poppler's `pdftotext` or falls back to PDFKit on macOS through the Swift command-line tools. See the [research plan](docs/research-mode-plan.md).
+
+Remote source PDFs stream to a temporary file. The download limit defaults to 32 MiB and can be set to 1–128 MiB with `JARVIS_RESEARCH_PDF_MAX_MIB`. Web pages use an 8 MiB limit. When a relevant source returns HTTP 403 or exceeds its limit, JARVIS can search for a matching public copy and records the result in the run diagnostics.
+
+#### Deep-research lifecycle
+
+```mermaid
+flowchart TD
+    Start["Start a deep-research mission"] --> Plan["Map questions across breadth, depth, and relevant tangents"]
+    Plan --> Pick["Pick the next open question"]
+    Pick --> Read["Search, open original sources, and collect evidence"]
+    Read --> Review["Compare supporting and conflicting evidence"]
+    Review --> Decision{"What did the research establish?"}
+    Decision -->|"Useful lead or evidence gap"| Pick
+    Decision -->|"Answered, out of scope, or useful routes exhausted"| More{"Other open questions?"}
+    More -->|"Yes"| Pick
+    More -->|"No"| Audit["Audit claim wording and citations"]
+    Audit -->|"Audit reopens a question"| Pick
+    Audit -->|"Audited findings available"| Write["Write a thematic briefing and check its prose against cited claims"]
+    Audit -->|"No findings ready for synthesis"| Digest["Publish an evidence digest and open questions"]
+    Write -->|"Prose passes the check"| Report["Publish Markdown and styled PDF"]
+    Write -->|"Writing or checking unavailable"| Digest
+```
+
+#### Source failures and recovery
+
+```mermaid
+flowchart TD
+    Open["Open an original source"] --> Result{"Retrieval result"}
+    Result -->|"Readable HTML or PDF"| Evidence["Save passages and source details"]
+    Result -->|"HTTP 403"| Public["Log the failure and look for a public copy by title or DOI when useful"]
+    Result -->|"PDF exceeds configured limit"| Limit["Log the limit and look for an HTML version or smaller copy"]
+    Result -->|"Access restricted or PDF has no usable text"| Gap["Record the access or extraction gap"]
+    Public --> Found{"Readable match found?"}
+    Limit --> Found
+    Found -->|"Yes"| Copy["Save the copy under the original evidence family"]
+    Found -->|"No"| Gap
+    Evidence --> Compare["Review the claim and seek independent evidence where needed"]
+    Copy --> Compare
+    Gap --> Compare
+```
+
+A public copy can restore access to a paper. Corroboration still requires evidence from another independent source.
+
+#### Mission controls and quota waits
+
+```mermaid
+flowchart LR
+    Run["Running"] -->|"Provider quota unavailable"| Wait["Wait until retry time"]
+    Wait -->|"Retry becomes eligible"| Run
+    Run -->|"Pause"| Paused["Paused with progress saved"]
+    Paused -->|"Resume"| Run
+    Paused -->|"Publish"| Export["Export an interim briefing"]
+    Run -->|"Stop"| Stopped["Stopped with an interim briefing"]
+    Paused -->|"Stop"| Stopped
+    Stopped -->|"Reopen"| Run
+    Run -->|"Steer, explore, or fact-check"| Replan["Update priorities and redirect the next step"]
+    Replan --> Run
+```
 
 ### 📄 Native Document & PDF Generation
 

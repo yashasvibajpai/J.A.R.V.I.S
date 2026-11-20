@@ -27,11 +27,18 @@ export async function diagnoseResearch(store: SQLiteResearchStore, id: string, t
   if (state) {
     const errors = state.sources.flatMap(source => {
       if (!source.error) return [];
+      if (source.failure === 'size_limit') return [source.error];
+      if (source.failure === 'access_required') return ['access restricted'];
+      if (source.failure === 'no_pdf_text') return ['PDF has no usable text · OCR may be needed'];
       return [source.error.match(/HTTP \d+/)?.[0] ?? (source.error.includes('pdftotext') ? 'PDF extractor unavailable'
         : /cert/i.test(source.error) ? 'TLS error' : source.error)];
     });
+    const recovery = steps.filter(step => step.stepType === 'deep_find_copy' && step.status === 'completed');
+    const publicCopies = state.sources.filter(source => source.alternativeFor && !source.error);
     lines.push(
       `Source records: ${state.sources.length - errors.length}/${state.sources.length} readable · ${counts(errors)}`,
+      ...(recovery.length ? [`Public-copy recovery: ${recovery.length} searches · ${publicCopies.length} readable alternatives`] : []),
+      ...publicCopies.map(source => `  ${source.alternativeFor} → ${source.id} · ${source.url}`),
       `Claim verdicts: ${counts(state.claims.map(claim => claim.verdict))}`,
       `Citation audits: ${counts(state.claims.map(claim => claim.audit ?? 'pending'))}`,
       '', 'Question decisions',

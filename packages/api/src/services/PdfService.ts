@@ -10,11 +10,24 @@ export interface PdfOptions {
 }
 
 interface TextBlock {
-  type: 'h1' | 'h2' | 'h3' | 'p' | 'bullet' | 'code' | 'hr' | 'quote';
+  type: 'h1' | 'h2' | 'h3' | 'p' | 'bullet' | 'code' | 'hr' | 'quote' | 'evidence';
   text: string;
   sourceLines?: number[];
   url?: string;
+  label?: EvidenceLabel;
+  citations?: { label: string; url: string }[];
 }
+
+const evidenceColors = {
+  'Corroborated': { accent: '0.08 0.39 0.27', fill: '0.88 0.95 0.91' },
+  'Single source': { accent: '0.47 0.30 0.04', fill: '0.98 0.93 0.83' },
+  'Mixed evidence': { accent: '0.42 0.25 0.54', fill: '0.95 0.91 0.98' },
+  'Disputed': { accent: '0.55 0.20 0.24', fill: '0.99 0.91 0.91' },
+  'Under review': { accent: '0.27 0.36 0.46', fill: '0.91 0.94 0.97' },
+  'Insufficient evidence': { accent: '0.35 0.36 0.40', fill: '0.93 0.94 0.96' },
+  'Interpretation': { accent: '0.18 0.34 0.60', fill: '0.89 0.93 0.99' },
+};
+type EvidenceLabel = keyof typeof evidenceColors;
 
 /**
  * PdfService — Zero-Dependency Professional PDF Document Generator
@@ -131,6 +144,39 @@ export class PdfService {
     };
 
     for (const block of blocks) {
+      if (block.type === 'evidence' && block.label) {
+        const { accent, fill } = evidenceColors[block.label];
+        const lines = this.wrapText(block.text, Math.floor((printableWidth - 34) / 6.1));
+        const citations = block.citations ?? [];
+        const height = 40 + lines.length * 16 + (citations.length ? 18 : 0);
+        if (currentY - height < margin + 10) newPage();
+        if (block.sourceLines) onBlock?.(currentPage + 1, block.sourceLines);
+        const canvas = pages[currentPage];
+        const top = currentY + 8;
+        const left = margin + 14;
+        const badgeText = block.label.toUpperCase();
+        canvas.push(
+          `q 0.97 0.98 0.99 rg ${margin} ${top - height} ${printableWidth} ${height} re f Q`,
+          `q ${accent} rg ${margin} ${top - height} 3 ${height} re f Q`,
+          `q ${fill} rg ${left} ${top - 23} ${badgeText.length * 5.25 + 16} 14 re f Q`,
+          `BT /F2 8 Tf ${accent} rg ${left + 8} ${top - 19} Td (${this.escapePdfText(badgeText)}) Tj ET`,
+        );
+        for (const [index, line] of lines.entries()) {
+          canvas.push(`BT /F1 11 Tf 0.11 0.17 0.24 rg ${left} ${top - 40 - index * 16} Td (${this.escapePdfText(line)}) Tj ET`);
+        }
+        const y = top - height + 13;
+        let x = left;
+        for (const citation of citations) {
+          const width = citation.label.length * 6 + 10;
+          if (x + width > pageWidth - margin - 8) break;
+          canvas.push(`BT /F2 9 Tf 0.07 0.35 0.58 rg ${x} ${y} Td (${this.escapePdfText(citation.label)}) Tj ET`);
+          annotations[currentPage].push({ url: citation.url, rect: `${x - 1} ${y - 3} ${x + width - 6} ${y + 9}` });
+          x += width + 7;
+        }
+        currentY = top - height - 17;
+        continue;
+      }
+
       if (block.type === 'hr') {
         if (currentY < margin + 40) newPage();
         if (block.sourceLines) onBlock?.(currentPage + 1, block.sourceLines);
@@ -275,9 +321,9 @@ export class PdfService {
     let fenceStart = 0;
     for (const [index, line] of lines.entries()) {
       const trimmed = line.trim();
-      const links = research ? [...trimmed.matchAll(/\[[^\]]+\]\(<(https?:\/\/[^>\s]+)>\)/gi)] : [];
+      const links = research ? [...trimmed.matchAll(/\[([^\]]+)\]\(<(https?:\/\/[^>\s]+)>\)/gi)] : [];
       const add = (type: TextBlock['type'], text: string, start = index) => blocks.push({
-        type, text, url: links.length === 1 ? links[0][1] : undefined,
+        type, text, url: links.length === 1 ? links[0][2] : undefined,
         sourceLines: Array.from({ length: index - start + 1 }, (_, offset) => start + offset),
       });
       const format = (value: string) => this.stripMarkdownSymbols(value, research);
@@ -327,13 +373,23 @@ export class PdfService {
 
       // Headers
       if (trimmed.startsWith('# ')) {
-        add('h1', format(trimmed.slice(2).trim()));
+        const title = format(trimmed.slice(2).trim());
+        add('h1', research && title.length > 215 ? title.slice(0, 212).trimEnd() + '...' : title);
       } else if (trimmed.startsWith('## ')) {
         add('h2', format(trimmed.slice(3).trim()));
       } else if (trimmed.startsWith('### ')) {
         add('h3', format(trimmed.slice(4).trim()));
       } else if (research && trimmed.startsWith('> ')) {
-        add('quote', format(trimmed.slice(2)));
+        const badge = /^> \*\*([^*]+)\*\*\s+(.+)$/.exec(trimmed);
+        if (badge && Object.hasOwn(evidenceColors, badge[1]) && badge[2].length < 1600) {
+          const body = badge[2].replace(/\[[^\]]+\]\(<https?:\/\/[^>\s]+>\)/gi, '').replace(/(?:\s+·\s*)+$/, '').trim();
+          blocks.push({
+            type: 'evidence', label: badge[1] as EvidenceLabel, text: format(body), sourceLines: [index],
+            citations: links.slice(0, 4).map(link => ({ label: format(link[1]).slice(0, 22), url: link[2] })),
+          });
+        } else {
+          add('quote', format(trimmed.slice(2)));
+        }
       } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || /^\d+\.\s/.test(trimmed)) {
         const text = trimmed.replace(/^[-*]\s+|\d+\.\s+/, '');
         add('bullet', format(text));
