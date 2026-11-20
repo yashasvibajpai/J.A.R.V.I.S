@@ -1,5 +1,6 @@
-import type { LLMProvider, LLMOptions, LLMCapabilities, Message } from '@jarvis/shared';
+import type { LLMProvider, LLMOptions, LLMCapabilities, LLMTokenUsage, Message } from '@jarvis/shared';
 import { normalizeMessages } from './pipeline.js';
+import type { SQLiteProviderQuota } from '../stores/SQLiteProviderQuota.js';
 
 // ─── Task Classification ─────────────────────────────────────────────────────
 
@@ -117,6 +118,7 @@ export interface RateLimits {
   rpm: number;          // requests per minute
   rpd: number;          // requests per day
   tokensPerDay: number; // daily token budget
+  tokensPerMinute?: number;
 }
 
 /** Live mutable state for a provider */
@@ -124,6 +126,7 @@ export interface ProviderState {
   requestsThisMinute: number;
   requestsToday: number;
   tokensToday: number;
+  tokensThisMinute?: number;
   cooldownUntil: Date | null;
   consecutiveFailures: number;
   lastUsed: Date | null;
@@ -147,9 +150,29 @@ export interface ProviderProfile {
 
 /** Manages per-provider rate limit budgets and cooldowns */
 class RateLimitGate {
+  constructor(private readonly quota?: SQLiteProviderQuota) {}
+
+  refresh(profile: ProviderProfile): void {
+    const state = profile.tier === 'local' ? undefined : this.quota?.read(profile.providerId);
+    if (state) profile.state = state;
+    this.maybeResetWindows(profile);
+  }
+
+  private update<T>(profile: ProviderProfile, apply: () => T): T {
+    if (!this.quota || profile.tier === 'local') return apply();
+    return this.quota.update(profile.providerId, profile.state, state => {
+      profile.state = state;
+      return apply();
+    });
+  }
 
   /** Check if a provider can handle a request right now */
   canUse(profile: ProviderProfile): boolean {
+    this.refresh(profile);
+    return this.hasCapacity(profile);
+  }
+
+  private hasCapacity(profile: ProviderProfile): boolean {
     this.maybeResetWindows(profile);
 
     // In cooldown?
@@ -158,7 +181,8 @@ class RateLimitGate {
     }
 
     // Per-minute limit
-    if (profile.state.requestsThisMinute >= profile.limits.rpm) {
+    if (profile.state.requestsThisMinute >= profile.limits.rpm ||
+      (profile.state.tokensThisMinute ?? 0) >= (profile.limits.tokensPerMinute ?? Infinity)) {
       return false;
     }
 
@@ -175,27 +199,62 @@ class RateLimitGate {
     return true;
   }
 
-  /** Record a successful request */
-  recordUsage(profile: ProviderProfile, estimatedTokens: number): void {
-    this.maybeResetWindows(profile);
-    profile.state.requestsThisMinute++;
-    profile.state.requestsToday++;
-    profile.state.tokensToday += estimatedTokens;
-    profile.state.consecutiveFailures = 0;
-    profile.state.lastUsed = new Date();
+  reserve(profile: ProviderProfile, estimatedTokens: number): { day: number; minute: number } | null {
+    return this.update(profile, () => {
+      if (!this.hasCapacity(profile) || profile.state.tokensToday + estimatedTokens > profile.limits.tokensPerDay ||
+        (profile.state.tokensThisMinute ?? 0) + estimatedTokens > (profile.limits.tokensPerMinute ?? Infinity)) return null;
+      profile.state.requestsThisMinute++;
+      profile.state.requestsToday++;
+      profile.state.tokensToday += estimatedTokens;
+      profile.state.tokensThisMinute = (profile.state.tokensThisMinute ?? 0) + estimatedTokens;
+      return { day: profile.state.dayWindowStart, minute: profile.state.minuteWindowStart };
+    });
+  }
+
+  reconcile(profile: ProviderProfile, window: { day: number; minute: number }, reserved: number, actual: number): void {
+    this.update(profile, () => {
+      if (profile.state.dayWindowStart === window.day) profile.state.tokensToday += actual - reserved;
+      if (profile.state.minuteWindowStart === window.minute) {
+        profile.state.tokensThisMinute = (profile.state.tokensThisMinute ?? 0) + actual - reserved;
+      }
+    });
+  }
+
+  nextAvailability(profile: ProviderProfile, estimatedTokens = 0): number {
+    this.refresh(profile);
+    return Math.max(
+      Date.now(),
+      profile.state.cooldownUntil?.getTime() ?? 0,
+      profile.state.requestsThisMinute >= profile.limits.rpm ||
+        (profile.state.tokensThisMinute ?? 0) + estimatedTokens > (profile.limits.tokensPerMinute ?? Infinity)
+        ? profile.state.minuteWindowStart + 60_001 : 0,
+      profile.state.requestsToday >= profile.limits.rpd || profile.state.tokensToday + estimatedTokens > profile.limits.tokensPerDay
+        ? profile.state.dayWindowStart + 86_400_001
+        : 0,
+    );
+  }
+
+  complete(profile: ProviderProfile): void {
+    this.update(profile, () => {
+      profile.state.consecutiveFailures = 0;
+      profile.state.lastUsed = new Date();
+    });
+  }
+
+  fail(profile: ProviderProfile): void {
+    this.update(profile, () => { profile.state.consecutiveFailures++; });
   }
 
   /** Trigger a cooldown after a rate limit (429) error */
-  triggerCooldown(profile: ProviderProfile, retryAfterMs?: number): void {
-    // Exponential backoff: 30s base, doubles with consecutive failures, max 5 min
-    const backoff = Math.min(
-      30_000 * Math.pow(2, profile.state.consecutiveFailures),
-      300_000
-    );
-    const cooldownMs = retryAfterMs ?? backoff;
-    profile.state.cooldownUntil = new Date(Date.now() + cooldownMs);
-    profile.state.consecutiveFailures++;
-    console.log(
+  triggerCooldown(profile: ProviderProfile, retryAfterMs?: number, log = true): void {
+    const cooldownMs = this.update(profile, () => {
+      const backoff = Math.min(30_000 * Math.pow(2, profile.state.consecutiveFailures), 300_000);
+      const until = Math.max(profile.state.cooldownUntil?.getTime() ?? 0, Date.now() + (retryAfterMs ?? backoff));
+      profile.state.cooldownUntil = new Date(until);
+      profile.state.consecutiveFailures++;
+      return until - Date.now();
+    });
+    if (log) console.log(
       `[gate] ⏳ ${profile.providerId}/${profile.modelId} cooling down for ${Math.round(cooldownMs / 1000)}s`
     );
   }
@@ -207,6 +266,7 @@ class RateLimitGate {
     // Reset per-minute window
     if (now - profile.state.minuteWindowStart > 60_000) {
       profile.state.requestsThisMinute = 0;
+      profile.state.tokensThisMinute = 0;
       profile.state.minuteWindowStart = now;
     }
 
@@ -224,6 +284,19 @@ class RateLimitGate {
 /** Rough token estimate: ~4 chars per token */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+export type ResearchAttemptOutcome = 'succeeded' | 'failed' | 'rate_limited' | 'aborted';
+
+interface ResearchCallTracker {
+  start(providerId: string, modelId: string, retry: boolean, messages: Message[]): string;
+  finish(id: string, outcome: ResearchAttemptOutcome, usage?: LLMTokenUsage, estimated?: boolean, details?: { error?: string; response?: string }): void;
+}
+
+export class ResearchQuotaWait extends Error {
+  constructor(readonly retryAt: number) {
+    super('Waiting for a free model provider');
+  }
 }
 
 /** Detect rate limit errors from various providers */
@@ -273,12 +346,12 @@ export class SmartRouter implements LLMProvider {
   /** Track which provider handled the last request (for metadata reporting) */
   private lastUsedProvider: { providerId: string; modelId: string } | null = null;
 
-  constructor(registry: ProviderProfile[]) {
+  constructor(registry: ProviderProfile[], quota?: SQLiteProviderQuota) {
     if (registry.length === 0) {
       throw new Error('SmartRouter requires at least one provider');
     }
     this.registry = registry;
-    this.gate = new RateLimitGate();
+    this.gate = new RateLimitGate(quota);
   }
 
   /**
@@ -308,14 +381,19 @@ export class SmartRouter implements LLMProvider {
 
     let lastError: Error | null = null;
 
+    const inputTokens = normalized.reduce((sum, message) => sum + estimateTokens(message.content), 0);
+    const reservation = inputTokens + (effectiveOptions.maxTokens ?? 8192);
     for (const profile of ordered) {
+      const day = this.gate.reserve(profile, reservation);
+      if (day === null) continue;
       try {
         console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → trying ${profile.providerId}/${profile.modelId}`);
         const result = await profile.provider.chat(normalized, effectiveOptions);
         if (!result || !result.trim()) {
           throw new Error(`Provider ${profile.providerId}/${profile.modelId} returned an empty response`);
         }
-        this.gate.recordUsage(profile, estimateTokens(result));
+        this.gate.reconcile(profile, day, reservation, inputTokens + estimateTokens(result));
+        this.gate.complete(profile);
         this.lastUsedProvider = { providerId: profile.providerId, modelId: profile.modelId };
         console.log(`[router] ✓ ${profile.providerId}/${profile.modelId} responded (${taskType})`);
         return result;
@@ -325,7 +403,7 @@ export class SmartRouter implements LLMProvider {
           this.gate.triggerCooldown(profile, parseRetryAfter(err));
           console.warn(`[router] ⏳ ${profile.providerId} rate-limited, cooling down`);
         } else {
-          profile.state.consecutiveFailures++;
+          this.gate.fail(profile);
           console.warn(`[router] ✗ ${profile.providerId} failed: ${lastError.message}`);
         }
       }
@@ -334,6 +412,67 @@ export class SmartRouter implements LLMProvider {
     throw new Error(
       `All ${this.registry.length} providers exhausted. Last error: ${lastError?.message}`
     );
+  }
+
+  async researchChat(messages: Message[], tracker: ResearchCallTracker, signal: AbortSignal): Promise<string> {
+    const normalized = normalizeMessages(messages);
+    const inputTokens = normalized.reduce((sum, message) => sum + estimateTokens(message.content), 0);
+    const outputCapacity = (profile: ProviderProfile) =>
+      Math.min(4096, Math.min(profile.limits.tokensPerDay, profile.limits.tokensPerMinute ?? Infinity) - inputTokens);
+    const free = this.registry.filter(profile => profile.tier === 'free' && outputCapacity(profile) >= 256);
+    if (!free.length) throw new Error('No configured free model provider can fit this research request');
+    const candidates = [...free].sort((a, b) => b.scores.reasoning - a.scores.reasoning);
+    let attempted = false;
+    let lastError: Error | undefined;
+    const waiting = new Set<ProviderProfile>();
+
+    for (const profile of candidates) {
+      signal.throwIfAborted();
+      const maxTokens = outputCapacity(profile);
+      const reservation = inputTokens + maxTokens;
+      const day = this.gate.reserve(profile, reservation);
+      if (day === null) {
+        waiting.add(profile);
+        continue;
+      }
+      const id = tracker.start(profile.providerId, profile.modelId, attempted, normalized);
+      attempted = true;
+      let usage: LLMTokenUsage | undefined;
+      let result: string;
+      try {
+        result = await profile.provider.chat(normalized, {
+          temperature: 0.2,
+          maxTokens,
+          signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+          onUsage: reported => {
+            if (Object.values(reported).some(Number.isFinite)) usage = reported;
+          },
+        });
+        if (!result.trim()) throw new Error('Provider returned an empty response');
+      } catch (error) {
+        const rateLimited = isRateLimitError(error);
+        tracker.finish(id, signal.aborted ? 'aborted' : rateLimited ? 'rate_limited' : 'failed', usage, false, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        signal.throwIfAborted();
+        if (rateLimited) {
+          this.gate.triggerCooldown(profile, parseRetryAfter(error), false);
+          waiting.add(profile);
+        }
+        else lastError = error instanceof Error ? error : new Error(String(error));
+        continue;
+      }
+      tracker.finish(id, 'succeeded', usage ?? { inputTokens, outputTokens: estimateTokens(result) }, !usage, { response: result });
+      const total = usage?.totalTokens ?? (usage?.inputTokens ?? inputTokens) + (usage?.outputTokens ?? estimateTokens(result));
+      this.gate.reconcile(profile, day, reservation, total);
+      this.gate.complete(profile);
+      signal.throwIfAborted();
+      return result;
+    }
+
+    if (lastError && !waiting.size) throw lastError;
+    throw new ResearchQuotaWait(Math.max(Date.now() + 3500, Math.min(...[...waiting].map(profile =>
+      this.gate.nextAvailability(profile, inputTokens + outputCapacity(profile))))));
   }
 
   async *stream(messages: Message[], options?: LLMOptions): AsyncGenerator<string> {
@@ -345,7 +484,11 @@ export class SmartRouter implements LLMProvider {
 
     let lastError: Error | null = null;
 
+    const inputTokens = normalized.reduce((sum, message) => sum + estimateTokens(message.content), 0);
+    const reservation = inputTokens + (effectiveOptions.maxTokens ?? 8192);
     for (const profile of ordered) {
+      const day = this.gate.reserve(profile, reservation);
+      if (day === null) continue;
       try {
         console.log(`[router] ${taskType} (effort: ${effectiveOptions.reasoningEffort ?? 'default'}) → streaming via ${profile.providerId}/${profile.modelId}`);
         const gen = profile.provider.stream(normalized, effectiveOptions);
@@ -355,14 +498,17 @@ export class SmartRouter implements LLMProvider {
         if (first.done || !first.value) {
           throw new Error(`Provider ${profile.providerId}/${profile.modelId} returned an empty stream`);
         }
+        let outputLength = first.value.length;
         yield first.value;
 
         // First chunk worked — commit to this provider
         for await (const chunk of gen) {
+          outputLength += chunk.length;
           yield chunk;
         }
 
-        this.gate.recordUsage(profile, 500); // estimate for streamed responses
+        this.gate.reconcile(profile, day, reservation, inputTokens + Math.ceil(outputLength / 4));
+        this.gate.complete(profile);
         this.lastUsedProvider = { providerId: profile.providerId, modelId: profile.modelId };
         console.log(`[router] ✓ ${profile.providerId} stream complete (${taskType})`);
         return;
@@ -372,7 +518,7 @@ export class SmartRouter implements LLMProvider {
           this.gate.triggerCooldown(profile, parseRetryAfter(err));
           console.warn(`[router] ⏳ ${profile.providerId} stream rate-limited`);
         } else {
-          profile.state.consecutiveFailures++;
+          this.gate.fail(profile);
           console.warn(`[router] ✗ ${profile.providerId} stream failed: ${lastError.message}`);
         }
       }
@@ -392,10 +538,11 @@ export class SmartRouter implements LLMProvider {
       .sort((a, b) => (b.scores.embedding ?? 0) - (a.scores.embedding ?? 0));
 
     for (const profile of candidates) {
+      if (this.gate.reserve(profile, estimateTokens(text)) === null) continue;
       try {
         console.log(`[router] embedding via ${profile.providerId}...`);
         const vector = await profile.provider.embed!(text);
-        this.gate.recordUsage(profile, estimateTokens(text));
+        this.gate.complete(profile);
         return vector;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -451,10 +598,11 @@ export class SmartRouter implements LLMProvider {
     consecutiveFailures: number;
   }> {
     return this.registry.map(p => {
+      this.gate.refresh(p);
       let status: 'available' | 'cooling_down' | 'exhausted' | 'unavailable';
       if (p.state.cooldownUntil && new Date() < p.state.cooldownUntil) {
         status = 'cooling_down';
-      } else if (p.state.requestsToday >= p.limits.rpd || p.state.tokensToday >= p.limits.tokensPerDay) {
+      } else if (p.state.requestsThisMinute >= p.limits.rpm || p.state.requestsToday >= p.limits.rpd || p.state.tokensToday >= p.limits.tokensPerDay) {
         status = 'exhausted';
       } else if (p.state.consecutiveFailures >= 5) {
         status = 'unavailable';

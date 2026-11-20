@@ -9,6 +9,10 @@
 
 import readline from 'readline';
 
+export function canUseTerminalView(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== 'dumb');
+}
+
 // ─── ANSI Colors & Styling ───────────────────────────────────────────────────
 
 export const c = {

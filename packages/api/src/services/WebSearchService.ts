@@ -11,6 +11,9 @@
  *   6. Brave Search (optional): Uses BRAVE_API_KEY if configured in .env.
  */
 
+import type { SQLiteProviderQuota } from '../stores/SQLiteProviderQuota.js';
+import type { ProviderState } from '../engine/SmartRouter.js';
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -45,7 +48,7 @@ export class WebSearchService {
   private tavilyApiKey?: string;
   private braveApiKey?: string;
 
-  constructor() {
+  constructor(private readonly quota?: SQLiteProviderQuota) {
     this.tavilyApiKey = process.env.TAVILY_API_KEY;
     this.braveApiKey = process.env.BRAVE_API_KEY;
   }
@@ -54,27 +57,35 @@ export class WebSearchService {
    * Search the live web for a given query.
    * Auto-selects the best search engine based on query intent and configured keys.
    */
-  async search(query: string, maxResults: number = 4): Promise<SearchResult[]> {
+  async search(query: string, maxResults = 4, options?: {
+    signal?: AbortSignal; warn?: (message: string) => void; publicOnly?: boolean;
+  }): Promise<SearchResult[]> {
+    const signal = options?.signal;
+    const warn = (message: string) => {
+      signal?.throwIfAborted();
+      (options?.warn ?? console.warn)(message);
+    };
+    signal?.throwIfAborted();
     const cleanQuery = query.trim();
     if (!cleanQuery) return [];
 
     // 1. If Tavily API key is provided, prefer it for LLM-optimized search
-    if (this.tavilyApiKey) {
+    if (!options?.publicOnly && this.tavilyApiKey && this.reserveSearch('tavily')) {
       try {
-        const results = await this.searchTavily(cleanQuery, maxResults);
+        const results = await this.searchTavily(cleanQuery, maxResults, signal);
         if (results.length > 0) return results;
       } catch (err) {
-        console.warn(`[web-search] Tavily search failed: ${err}. Falling back to native.`);
+        warn(`[web-search] Tavily search failed: ${err}. Falling back to native.`);
       }
     }
 
     // 2. If Brave API key is provided, use Brave
-    if (this.braveApiKey) {
+    if (!options?.publicOnly && this.braveApiKey && this.reserveSearch('brave')) {
       try {
-        const results = await this.searchBrave(cleanQuery, maxResults);
+        const results = await this.searchBrave(cleanQuery, maxResults, signal);
         if (results.length > 0) return results;
       } catch (err) {
-        console.warn(`[web-search] Brave search failed: ${err}. Falling back to native.`);
+        warn(`[web-search] Brave search failed: ${err}. Falling back to native.`);
       }
     }
 
@@ -84,12 +95,12 @@ export class WebSearchService {
     if (isNewsQuery) {
       const targetCount = Math.max(maxResults, 6);
       const [newsResults, ddgResults] = await Promise.all([
-        this.searchGoogleNews(cleanQuery, targetCount).catch((err) => {
-          console.warn(`[web-search] Google News RSS failed: ${err}`);
+        this.searchGoogleNews(cleanQuery, targetCount, signal).catch((err) => {
+          warn(`[web-search] Google News RSS failed: ${err}`);
           return [] as SearchResult[];
         }),
-        this.searchDuckDuckGoHtml(cleanQuery, targetCount).catch((err) => {
-          console.warn(`[web-search] DuckDuckGo HTML search failed: ${err}`);
+        this.searchDuckDuckGoHtml(cleanQuery, targetCount, signal).catch((err) => {
+          warn(`[web-search] DuckDuckGo HTML search failed: ${err}`);
           return [] as SearchResult[];
         }),
       ]);
@@ -144,24 +155,25 @@ export class WebSearchService {
 
     // 4. Try DuckDuckGo HTML search for general queries
     try {
-      const ddgHtml = await this.searchDuckDuckGoHtml(cleanQuery, maxResults);
+      const ddgHtml = await this.searchDuckDuckGoHtml(cleanQuery, maxResults, signal);
       if (ddgHtml.length > 0) return ddgHtml;
     } catch (err) {
-      console.warn(`[web-search] DuckDuckGo HTML search failed: ${err}`);
+      warn(`[web-search] DuckDuckGo HTML search failed: ${err}`);
     }
 
     // 5. Fallback to DuckDuckGo Instant Answer / Knowledge Base
     try {
-      const ddgResults = await this.searchDuckDuckGo(cleanQuery, maxResults);
+      const ddgResults = await this.searchDuckDuckGo(cleanQuery, maxResults, signal);
       if (ddgResults.length > 0) return ddgResults;
     } catch (err) {
-      console.warn(`[web-search] DuckDuckGo instant search failed: ${err}`);
+      warn(`[web-search] DuckDuckGo instant search failed: ${err}`);
     }
 
     // 6. Final fallback to Google News
     try {
-      return await this.searchGoogleNews(cleanQuery, maxResults);
+      return await this.searchGoogleNews(cleanQuery, maxResults, signal);
     } catch {
+      signal?.throwIfAborted();
       return [];
     }
   }
@@ -288,9 +300,10 @@ export class WebSearchService {
 
   // ─── DuckDuckGo HTML Search (Rich Web Articles & Snippets) ──────────────────
 
-  private async searchDuckDuckGoHtml(query: string, maxResults: number): Promise<SearchResult[]> {
+  private async searchDuckDuckGoHtml(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     const res = await fetch(url, {
+      signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html',
@@ -346,9 +359,10 @@ export class WebSearchService {
 
   // ─── Google News RSS (Zero-Key Live News) ───────────────────────────────────
 
-  private async searchGoogleNews(query: string, maxResults: number): Promise<SearchResult[]> {
+  private async searchGoogleNews(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
     const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
     const res = await fetch(url, {
+      signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       },
@@ -389,9 +403,10 @@ export class WebSearchService {
 
   // ─── DuckDuckGo Instant Answer API ─────────────────────────────────────────
 
-  private async searchDuckDuckGo(query: string, maxResults: number): Promise<SearchResult[]> {
+  private async searchDuckDuckGo(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
     const res = await fetch(url, {
+      signal,
       headers: { 'User-Agent': 'JARVIS/1.0' },
     });
 
@@ -437,8 +452,9 @@ export class WebSearchService {
 
   // ─── Tavily Search API (Optional) ──────────────────────────────────────────
 
-  private async searchTavily(query: string, maxResults: number): Promise<SearchResult[]> {
+  private async searchTavily(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
     const res = await fetch('https://api.tavily.com/search', {
+      signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -450,6 +466,7 @@ export class WebSearchService {
     });
 
     if (!res.ok) {
+      this.searchCooldown('tavily', res);
       throw new Error(`Tavily API returned HTTP ${res.status}`);
     }
 
@@ -468,9 +485,10 @@ export class WebSearchService {
 
   // ─── Brave Search API (Optional) ───────────────────────────────────────────
 
-  private async searchBrave(query: string, maxResults: number): Promise<SearchResult[]> {
+  private async searchBrave(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResult[]> {
     const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`;
     const res = await fetch(url, {
+      signal,
       headers: {
         Accept: 'application/json',
         'X-Subscription-Token': this.braveApiKey!,
@@ -478,6 +496,7 @@ export class WebSearchService {
     });
 
     if (!res.ok) {
+      this.searchCooldown('brave', res);
       throw new Error(`Brave API returned HTTP ${res.status}`);
     }
 
@@ -495,6 +514,58 @@ export class WebSearchService {
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  private searchState(): ProviderState {
+    const now = Date.now();
+    return {
+      requestsThisMinute: 0, requestsToday: 0, tokensToday: 0, cooldownUntil: null, consecutiveFailures: 0,
+      lastUsed: null, minuteWindowStart: now, dayWindowStart: now,
+    };
+  }
+
+  private reserveSearch(provider: 'tavily' | 'brave'): boolean {
+    if (!this.quota) return true;
+    const setting = (suffix: string) => {
+      const key = `JARVIS_${provider.toUpperCase()}_SEARCH_${suffix}`;
+      const raw = process.env[key];
+      if (!raw?.trim()) return Infinity;
+      const amount = Number(raw);
+      if (!Number.isSafeInteger(amount) || amount < 1) throw new Error(`${key} must be a positive integer`);
+      return amount;
+    };
+    const rpm = setting('RPM');
+    const monthly = setting('MONTHLY');
+    return this.quota.update(`search/${provider}`, this.searchState(), state => {
+      const now = Date.now();
+      const date = new Date(now);
+      const month = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
+      if (month !== state.dayWindowStart) {
+        state.dayWindowStart = month;
+        state.requestsToday = 0;
+      }
+      if (now >= state.minuteWindowStart + 60_000) {
+        state.minuteWindowStart = now;
+        state.requestsThisMinute = 0;
+      }
+      if ((state.cooldownUntil && state.cooldownUntil.getTime() > now) ||
+        state.requestsThisMinute >= rpm || state.requestsToday >= monthly) return false;
+      state.requestsThisMinute++;
+      state.requestsToday++;
+      return true;
+    });
+  }
+
+  private searchCooldown(provider: 'tavily' | 'brave', response: Response): void {
+    if (!this.quota || response.status !== 429) return;
+    const header = response.headers.get('retry-after');
+    const now = Date.now();
+    const resume = header && Number.isFinite(Number(header)) ? now + Number(header) * 1000
+      : header ? Date.parse(header) : NaN;
+    this.quota.update(`search/${provider}`, this.searchState(), state => {
+      state.cooldownUntil = new Date(Math.max(now + 1000, state.cooldownUntil?.getTime() ?? 0,
+        Number.isFinite(resume) ? resume : now + 60_000));
+    });
+  }
 
   private isCurrentEventsQuery(query: string): boolean {
     const lower = query.toLowerCase();

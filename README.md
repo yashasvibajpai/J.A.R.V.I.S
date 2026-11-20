@@ -156,6 +156,18 @@ pnpm jarvis "What's the latest on Iran?"
 - **Floating Ephemeral Asides (`/btw`)**: Pop up quick side questions mid-workflow. The response is displayed in a distinct floating card and excluded from session history.
 - **Whimsical Marvel J.A.R.V.I.S. & Vision Spinners**: Real-time rotating telemetry verbs (*"Calibrating repulsor telemetry..."*, *"Synthesizing neural pathways with the Mind Stone..."*, *"Modulating vibranium matrix frequencies..."*) with context-aware tips.
 
+### Background research
+
+`/research <topic>` starts a brief. Use `/research -d <topic>` for an open-ended investigation. A local worker keeps running after the terminal closes and advances one action per tick. Deep missions read original sources, compare supporting and conflicting evidence, and check citations before publishing. They finish when the evidence answers the questions or useful search paths are exhausted.
+
+- Use `/research dashboard [id]` to follow the mission, browse documents, and pause, resume, or stop it. Stopping publishes the committed evidence.
+- Use `/research steer <id> focus on <area>` or `/research explore <id> <related question>` to change direction. Use `/research fact-check <id> <claim-id> [source URL or correction]` to reopen a finding.
+- Open `/research doc help` for a tabbed guide with command examples for creating, editing, and exporting research documents. Use Tab or the arrow keys to switch tabs and Esc to return. Revisions can be exported as Markdown and PDF, and `/research doc bundle <id>` saves the research ledger and document history as JSON.
+- Use `/research publish <id>` to export a briefing from a paused, stopped, or completed mission. This leaves the mission state as it is. The report ends with pending research areas.
+- Use `/research diagnose <id>` for retrieval failures, question stop decisions, and per-call timing and provider errors. Set `JARVIS_RESEARCH_TRACE=true` before starting the worker to capture full prompts and responses locally, then use `/research diagnose <id> --trace`.
+
+Research requires a configured free model provider. Configure account-specific model and search limits in `.env` where needed. Report export uses the built-in PDF renderer. For PDF text extraction, JARVIS uses Poppler's `pdftotext` or falls back to PDFKit on macOS through the Swift command-line tools. See the [research plan](docs/research-mode-plan.md).
+
 ### 📄 Native Document & PDF Generation
 
 JARVIS creates and compiles documents directly to disk without requiring external tools or headless browsers:

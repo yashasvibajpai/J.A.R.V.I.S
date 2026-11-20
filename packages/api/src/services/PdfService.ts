@@ -6,11 +6,14 @@ export interface PdfOptions {
   author?: string;
   margin?: number;
   fontSize?: number;
+  theme?: 'research';
 }
 
 interface TextBlock {
-  type: 'h1' | 'h2' | 'h3' | 'p' | 'bullet' | 'code' | 'hr';
+  type: 'h1' | 'h2' | 'h3' | 'p' | 'bullet' | 'code' | 'hr' | 'quote';
   text: string;
+  sourceLines?: number[];
+  url?: string;
 }
 
 /**
@@ -62,6 +65,7 @@ export class PdfService {
       // En-dash and em-dash
       .replace(/\u2013/g, '-')
       .replace(/[\u2014\u2015]/g, ' - ')
+      .replace(/\u00b7/g, ' / ')
       // Smart double quotes -> standard double quote
       .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
       // Smart single quotes & apostrophes -> standard single quote
@@ -102,7 +106,7 @@ export class PdfService {
   /**
    * Generates a raw Buffer containing a valid PDF 1.4 document.
    */
-  generatePdfBuffer(markdown: string, options: PdfOptions = {}): Buffer {
+  generatePdfBuffer(markdown: string, options: PdfOptions = {}, onBlock?: (page: number, sourceLines: number[]) => void): Buffer {
     const title = options.title || 'J.A.R.V.I.S Document';
     const author = options.author || 'J.A.R.V.I.S';
     const margin = options.margin ?? 54; // 0.75 in = 54 pt
@@ -110,15 +114,18 @@ export class PdfService {
     const pageHeight = 792; // Standard Letter height (points)
     const printableWidth = pageWidth - margin * 2;
 
-    const blocks = this.parseMarkdown(markdown);
+    const research = options.theme === 'research';
+    const blocks = this.parseMarkdown(markdown, research);
 
     // Layout blocks into pages
     const pages: string[][] = [[]];
+    const annotations: { url: string; rect: string }[][] = [[]];
     let currentPage = 0;
     let currentY = pageHeight - margin - 20; // Top margin
 
     const newPage = () => {
       pages.push([]);
+      annotations.push([]);
       currentPage++;
       currentY = pageHeight - margin - 20;
     };
@@ -126,6 +133,7 @@ export class PdfService {
     for (const block of blocks) {
       if (block.type === 'hr') {
         if (currentY < margin + 40) newPage();
+        if (block.sourceLines) onBlock?.(currentPage + 1, block.sourceLines);
         currentY -= 10;
         // Draw horizontal line
         pages[currentPage].push(
@@ -136,22 +144,24 @@ export class PdfService {
       }
 
       let font = '/F1'; // Helvetica
-      let size = 10.5;
-      let leading = 14;
+      let size = options.fontSize ?? 10.5;
+      let leading = research ? 16 : 14;
       let color = '0.15 0.15 0.15 rg'; // dark charcoal
       let indent = 0;
 
       if (block.type === 'h1') {
         font = '/F2'; // Helvetica-Bold
-        size = 18;
-        leading = 24;
-        color = '0.05 0.1 0.25 rg'; // Navy
+        size = research ? 24 : 18;
+        leading = research ? 30 : 24;
+        color = research ? '1 1 1 rg' : '0.05 0.1 0.25 rg';
+        if (research) indent = 15;
         currentY -= 8;
       } else if (block.type === 'h2') {
         font = '/F2';
         size = 14;
         leading = 19;
-        color = '0.1 0.2 0.35 rg';
+        color = research ? '0.03 0.31 0.34 rg' : '0.1 0.2 0.35 rg';
+        if (research) indent = 11;
         currentY -= 6;
       } else if (block.type === 'h3') {
         font = '/F2';
@@ -161,6 +171,11 @@ export class PdfService {
         currentY -= 4;
       } else if (block.type === 'bullet') {
         indent = 16;
+      } else if (block.type === 'quote') {
+        indent = 13;
+        size = 10;
+        leading = 15;
+        color = '0.08 0.32 0.37 rg';
       } else if (block.type === 'code') {
         font = '/F3'; // Courier
         size = 9;
@@ -170,16 +185,28 @@ export class PdfService {
       }
 
       // Wrap text
-      const maxCharsPerLine = Math.floor((printableWidth - indent) / (size * 0.52));
+      const maxCharsPerLine = Math.max(12, Math.floor((printableWidth - indent * (research ? 2 : 1)) / (size * (research ? 0.57 : 0.52))));
       const lines = this.wrapText(block.text, maxCharsPerLine);
+      if (research && ['h1', 'h2', 'h3'].includes(block.type)) {
+        const height = leading * lines.length;
+        if (currentY - Math.min(height, 300) < margin + 55) newPage();
+        if (block.type === 'h1' || block.type === 'h2') {
+          const tone = block.type === 'h1' ? '0.05 0.13 0.24' : '0.89 0.95 0.95';
+          pages[currentPage].push(`q ${tone} rg ${margin} ${currentY - height + leading - 10} ${printableWidth} ${height + 11} re f Q`);
+        }
+      }
 
       for (let i = 0; i < lines.length; i++) {
         if (currentY < margin + 40) {
           newPage();
         }
+        if (block.sourceLines) onBlock?.(currentPage + 1, block.sourceLines);
 
         const line = lines[i];
         const xPos = margin + indent;
+        if (research && block.type === 'quote') {
+          pages[currentPage].push(`q 0.12 0.55 0.55 rg ${margin} ${currentY - 4} 3 ${leading} re f Q`);
+        }
 
         if (block.type === 'bullet' && i === 0) {
           // Draw standard bullet using WinAnsi octal escape \225
@@ -192,6 +219,9 @@ export class PdfService {
         pages[currentPage].push(
           `BT ${font} ${size} Tf ${color} ${xPos} ${currentY} Td (${escaped}) Tj ET`
         );
+        if (block.url) annotations[currentPage].push({
+          url: block.url, rect: `${xPos} ${currentY - 3} ${pageWidth - margin} ${currentY + size}`,
+        });
 
         currentY -= leading;
       }
@@ -202,8 +232,10 @@ export class PdfService {
     // Add header & footer to each page
     const totalPages = pages.length;
     for (let p = 0; p < totalPages; p++) {
+      if (research) pages[p].unshift(`q 1 1 1 rg 0 0 ${pageWidth} ${pageHeight} re f Q`);
       // Header: Document title & subtle divider
-      const headerTitle = this.escapePdfText(title);
+      const headerTitle = this.escapePdfText(research ? 'J.A.R.V.I.S.  /  RESEARCH BRIEFING' : title);
+      if (research) pages[p].push(`q 0.12 0.55 0.55 rg 0 ${pageHeight - 7} ${pageWidth} 7 re f Q`);
       pages[p].push(
         `BT /F1 8 Tf 0.5 0.5 0.5 rg ${margin} ${pageHeight - margin + 12} Td (${headerTitle}) Tj ET`,
         `q 0.25 w 0.85 0.85 0.85 RG ${margin} ${pageHeight - margin + 8} m ${pageWidth - margin} ${pageHeight - margin + 8} l S Q`
@@ -220,25 +252,44 @@ export class PdfService {
     }
 
     // Compile into PDF 1.4 document stream
-    return this.buildPdfObjects(pages, pageWidth, pageHeight, title, author);
+    return this.buildPdfObjects(pages, pageWidth, pageHeight, title, author, annotations);
   }
 
-  private parseMarkdown(md: string): TextBlock[] {
+  sourceLinesForPages(markdown: string, first: number, last: number, theme?: PdfOptions['theme']): Set<number> {
+    const selected = new Set<number>();
+    let pages = 1;
+    this.generatePdfBuffer(markdown, { theme }, (page, lines) => {
+      pages = Math.max(page, pages);
+      if (page >= first && page <= last) lines.forEach(line => selected.add(line));
+    });
+    if (last > pages) throw new Error(`This revision has ${pages} PDF page(s)`);
+    return selected;
+  }
+
+  private parseMarkdown(md: string, research = false): TextBlock[] {
     const lines = md.replace(/\r\n/g, '\n').split('\n');
     const blocks: TextBlock[] = [];
     let inCodeBlock = false;
     let codeBuffer: string[] = [];
 
-    for (const line of lines) {
+    let fenceStart = 0;
+    for (const [index, line] of lines.entries()) {
       const trimmed = line.trim();
+      const links = research ? [...trimmed.matchAll(/\[[^\]]+\]\(<(https?:\/\/[^>\s]+)>\)/gi)] : [];
+      const add = (type: TextBlock['type'], text: string, start = index) => blocks.push({
+        type, text, url: links.length === 1 ? links[0][1] : undefined,
+        sourceLines: Array.from({ length: index - start + 1 }, (_, offset) => start + offset),
+      });
+      const format = (value: string) => this.stripMarkdownSymbols(value, research);
 
       if (trimmed.startsWith('```')) {
         if (inCodeBlock) {
           inCodeBlock = false;
-          blocks.push({ type: 'code', text: codeBuffer.join('\n') });
+          add('code', codeBuffer.join('\n'), fenceStart);
           codeBuffer = [];
         } else {
           inCodeBlock = true;
+          fenceStart = index;
         }
         continue;
       }
@@ -252,7 +303,7 @@ export class PdfService {
 
       // Dividers
       if (trimmed === '---' || trimmed === '***' || trimmed === '___') {
-        blocks.push({ type: 'hr', text: '' });
+        add('hr', '');
         continue;
       }
 
@@ -265,42 +316,46 @@ export class PdfService {
       if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.includes('|')) {
         const cells = trimmed
           .split('|')
-          .map((c) => this.stripMarkdownSymbols(c.trim()))
+          .map((c) => format(c.trim()))
           .filter(Boolean);
         if (cells.length > 0) {
           const rowText = cells.join('  |  ');
-          blocks.push({ type: 'bullet', text: rowText });
+          add('bullet', rowText);
           continue;
         }
       }
 
       // Headers
       if (trimmed.startsWith('# ')) {
-        blocks.push({ type: 'h1', text: trimmed.slice(2).trim() });
+        add('h1', format(trimmed.slice(2).trim()));
       } else if (trimmed.startsWith('## ')) {
-        blocks.push({ type: 'h2', text: trimmed.slice(3).trim() });
+        add('h2', format(trimmed.slice(3).trim()));
       } else if (trimmed.startsWith('### ')) {
-        blocks.push({ type: 'h3', text: trimmed.slice(4).trim() });
+        add('h3', format(trimmed.slice(4).trim()));
+      } else if (research && trimmed.startsWith('> ')) {
+        add('quote', format(trimmed.slice(2)));
       } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || /^\d+\.\s/.test(trimmed)) {
         const text = trimmed.replace(/^[-*]\s+|\d+\.\s+/, '');
-        blocks.push({ type: 'bullet', text: this.stripMarkdownSymbols(text) });
+        add('bullet', format(text));
       } else {
-        blocks.push({ type: 'p', text: this.stripMarkdownSymbols(trimmed) });
+        add('p', format(trimmed));
       }
     }
 
     if (inCodeBlock && codeBuffer.length > 0) {
-      blocks.push({ type: 'code', text: codeBuffer.join('\n') });
+      blocks.push({ type: 'code', text: codeBuffer.join('\n'), sourceLines: Array.from({ length: lines.length - fenceStart }, (_, index) => fenceStart + index) });
     }
 
     return blocks;
   }
 
-  private stripMarkdownSymbols(text: string): string {
+  private stripMarkdownSymbols(text: string, compactLinks = false): string {
     return text
       .replace(/\*\*(.*?)\*\*/g, '$1')
       .replace(/\*(.*?)\*/g, '$1')
       .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\(<([^>]+)>\)/g, compactLinks ? '$1' : '$1 ($2)')
+      .replace(/\\([\\`*_[\]<>])/g, '$1')
       .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
       .replace(/~~(.*?)~~/g, '$1');
   }
@@ -310,7 +365,7 @@ export class PdfService {
     const lines: string[] = [];
     let currentLine = '';
 
-    for (const word of words) {
+    for (const word of words.flatMap(word => word.match(new RegExp(`.{1,${maxChars}}`, 'gu')) ?? [])) {
       if ((currentLine + ' ' + word).trim().length <= maxChars) {
         currentLine = (currentLine + ' ' + word).trim();
       } else {
@@ -335,12 +390,13 @@ export class PdfService {
     pageWidth: number,
     pageHeight: number,
     title: string,
-    author: string
+    author: string,
+    annotations: { url: string; rect: string }[][],
   ): Buffer {
     const numPages = pages.length;
     // Objects:
     // 1: Catalog
-    // 2: Outlines
+    // 2: Viewer preferences
     // 3: Pages
     // 4..4+numPages-1: Page objects
     // Font objects: F1 (Helvetica), F2 (Helvetica-Bold), F3 (Courier)
@@ -357,20 +413,25 @@ export class PdfService {
 
     const objects: { id: number; data: string }[] = [];
 
-    // Catalog & Outlines & Pages
-    objects.push({ id: 1, data: `<< /Type /Catalog /Pages 3 0 R /Outlines 2 0 R >>` });
-    objects.push({ id: 2, data: `<< /Type /Outlines /Count 0 >>` });
+    objects.push({ id: 1, data: `<< /Type /Catalog /Pages 3 0 R /ViewerPreferences 2 0 R >>` });
+    objects.push({ id: 2, data: '<< /DisplayDocTitle true >>' });
     objects.push({
       id: 3,
       data: `<< /Type /Pages /Kids [${pageKids.join(' ')}] /Count ${numPages} >>`,
     });
 
     // Page Objects
+    let annotationId = contentStartId + numPages;
     for (let i = 0; i < numPages; i++) {
       const contentId = contentStartId + i;
+      const refs = annotations[i].map(({ url, rect }) => {
+        const id = annotationId++;
+        objects.push({ id, data: `<< /Type /Annot /Subtype /Link /Rect [${rect}] /Border [0 0 0] /A << /S /URI /URI (${this.escapePdfText(url)}) >> >>` });
+        return `${id} 0 R`;
+      });
       objects.push({
         id: 4 + i,
-        data: `<< /Type /Page /Parent 3 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Contents ${contentId} 0 R /Resources << /Font << /F1 ${font1Id} 0 R /F2 ${font2Id} 0 R /F3 ${font3Id} 0 R >> >> >>`,
+        data: `<< /Type /Page /Parent 3 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Contents ${contentId} 0 R ${refs.length ? `/Annots [${refs.join(' ')}]` : ''} /Resources << /Font << /F1 ${font1Id} 0 R /F2 ${font2Id} 0 R /F3 ${font3Id} 0 R >> >> >>`,
       });
     }
 

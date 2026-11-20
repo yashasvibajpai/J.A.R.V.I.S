@@ -77,7 +77,17 @@ export class OpenAICompatibleAdapter implements LLMProvider {
     };
 
     try {
-      const response = await this.client.chat.completions.create(params);
+      const response = await this.client.chat.completions.create(params, {
+        signal: options?.signal,
+        maxRetries: options?.onUsage ? 0 : undefined,
+      });
+      if (response.usage) {
+        options?.onUsage?.({
+          inputTokens: response.usage.prompt_tokens,
+          outputTokens: response.usage.completion_tokens,
+          totalTokens: response.usage.total_tokens,
+        });
+      }
       const choice = response.choices?.[0];
       const content = choice?.message?.content;
       const reasoning = (choice?.message as any)?.reasoning || (choice?.message as any)?.reasoning_content;
@@ -90,7 +100,7 @@ export class OpenAICompatibleAdapter implements LLMProvider {
     } catch (err: any) {
       // Gracefully retry without reasoning_effort if provider/model rejects the parameter
       if (
-        options?.reasoningEffort &&
+        !options?.onUsage && options?.reasoningEffort &&
         (err?.message?.includes('reasoning_effort') || err?.message?.includes('unknown parameter') || err?.status === 400)
       ) {
         delete params.reasoning_effort;

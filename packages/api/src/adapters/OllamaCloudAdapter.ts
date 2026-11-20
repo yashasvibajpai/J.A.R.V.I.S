@@ -1,4 +1,4 @@
-import { Ollama } from 'ollama';
+import { Ollama, type Config } from 'ollama';
 import type { LLMProvider, LLMOptions, LLMCapabilities, Message } from '@jarvis/shared';
 
 /**
@@ -11,19 +11,25 @@ import type { LLMProvider, LLMOptions, LLMCapabilities, Message } from '@jarvis/
 export class OllamaCloudAdapter implements LLMProvider {
   private client: Ollama;
   private model: string;
+  private readonly config: Pick<Config, 'host' | 'headers'>;
 
   constructor(apiKey: string, model = 'qwen3-coder:480b-cloud') {
-    this.client = new Ollama({
+    this.config = {
       host: 'https://api.ollama.com',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
-      } as Record<string, string>,
-    });
+      },
+    };
+    this.client = new Ollama(this.config);
     this.model = model;
   }
 
   async chat(messages: Message[], options?: LLMOptions): Promise<string> {
-    const response = await this.client.chat({
+    const client = options?.signal ? new Ollama({
+      ...this.config,
+      fetch: (input, init) => fetch(input, { ...init, signal: options.signal }),
+    }) : this.client;
+    const response = await client.chat({
       model: this.model,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       options: {
@@ -33,6 +39,10 @@ export class OllamaCloudAdapter implements LLMProvider {
       },
     });
 
+    options?.onUsage?.({
+      inputTokens: response.prompt_eval_count,
+      outputTokens: response.eval_count,
+    });
     return response.message.content;
   }
 

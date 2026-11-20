@@ -16,8 +16,9 @@
 import readline from 'readline/promises';
 import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, mkdirSync } from 'fs';
-import { exec } from 'child_process';
+import { closeSync, existsSync, mkdirSync, openSync } from 'fs';
+import { exec, spawn } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'util';
 
 import 'dotenv/config';
@@ -50,11 +51,16 @@ import { SQLiteCaptureStore } from '../stores/SQLiteCaptureStore.js';
 import { SQLiteSessionStore } from '../stores/SQLiteSessionStore.js';
 import { LanceVectorStore } from '../stores/LanceVectorStore.js';
 import { SQLiteResearchStore } from '../stores/SQLiteResearchStore.js';
+import { SQLiteProviderQuota } from '../stores/SQLiteProviderQuota.js';
 import { ResearchEngine } from '../engine/ResearchEngine.js';
 import type { Message } from '@jarvis/shared';
+import { researchState, researchUsageSummary, showResearchDashboard } from './research-dashboard.js';
+import { isResearchDocumentHelp, showResearchDocumentHelp } from './research-document-help.js';
+import { handleResearchWorkspaceCommand, printResearchText } from './research-workspace-cli.js';
 
 import {
   c,
+  canUseTerminalView,
   JarvisSpinner,
   renderEphemeralAside,
   askUserQuestion,
@@ -67,13 +73,60 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── CLI Core Setup ───────────────────────────────────────────────────────────
 
-export async function initJarvisSystem() {
+function jarvisDataDirectory() {
   const DATA_DIR = resolve(__dirname, '../../../data');
   const ALT_DATA_DIR = resolve(__dirname, '../../data');
-  const dataDir = existsSync(DATA_DIR) ? DATA_DIR : ALT_DATA_DIR;
+  return process.env.JARVIS_DATA_DIR ? resolve(process.env.JARVIS_DATA_DIR)
+    : existsSync(DATA_DIR) ? DATA_DIR : ALT_DATA_DIR;
+}
+
+function wakeResearchWorker(store: SQLiteResearchStore, dataDir: string): void {
+  if (!store.hasUnfinishedWork()) return;
+  const pid = store.workerPid();
+  if (pid) {
+    try {
+      process.kill(pid, 0);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return;
+    }
+  }
+  const log = openSync(resolve(dataDir, 'research.log'), 'a');
+  try {
+    const worker = spawn(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--research-worker', dataDir], {
+      detached: true, stdio: ['ignore', log, log],
+    });
+    worker.on('error', error => console.error(`Could not start research worker: ${error.message}`));
+    worker.unref();
+  } finally {
+    closeSync(log);
+  }
+}
+
+async function runResearchWorker(dataDir: string): Promise<void> {
+  const store = new SQLiteResearchStore(resolve(dataDir, 'research.db'));
+  const owner = randomUUID();
+  if (!store.acquireWorker(owner, process.pid)) return;
+  const quota = new SQLiteProviderQuota(resolve(dataDir, 'provider-quota.sqlite'));
+  const router = new SmartRouter(buildProviderRegistry(), quota);
+  const engine = new ResearchEngine(store, router, new WebSearchService(quota), new FileService(process.env.JARVIS_RESEARCH_OUTPUT_DIR), {
+    logFile: resolve(dataDir, 'research.log'),
+  });
+  engine.start();
+  const heartbeat = setInterval(() => {
+    if (!store.renewWorker(owner) || store.releaseWorkerWhenIdle(owner)) {
+      clearInterval(heartbeat);
+      engine.stop();
+    }
+  }, 3000);
+}
+
+export async function initJarvisSystem() {
+  const dataDir = jarvisDataDirectory();
   mkdirSync(dataDir, { recursive: true });
 
-  const router = new SmartRouter(buildProviderRegistry());
+  const quota = new SQLiteProviderQuota(resolve(dataDir, 'provider-quota.sqlite'));
+  const router = new SmartRouter(buildProviderRegistry(), quota);
   const cartridge = loadCartridge();
   const baseSystemPrompt = buildSystemPrompt(cartridge);
 
@@ -90,7 +143,7 @@ export async function initJarvisSystem() {
   const vectorStore = new LanceVectorStore(lancedbDir);
   await vectorStore.init();
 
-  const webSearch = new WebSearchService();
+  const webSearch = new WebSearchService(quota);
   const fileService = new FileService();
 
   const researchStore = new SQLiteResearchStore(resolve(dataDir, 'research.db'));
@@ -98,10 +151,10 @@ export async function initJarvisSystem() {
     researchStore,
     router,
     webSearch,
-    fileService,
-    { logFile: resolve(dataDir, 'research.log') }
+    process.env.JARVIS_RESEARCH_OUTPUT_DIR ? new FileService(process.env.JARVIS_RESEARCH_OUTPUT_DIR) : fileService,
+    { logFile: resolve(dataDir, 'research.log'), wakeWorker: () => wakeResearchWorker(researchStore, dataDir) }
   );
-  // Auto-start tick loop to process background work / resume existing missions
+  // Resume unfinished research independently of the REPL.
   researchEngine.start();
 
   // Assemble CLI Message Pipeline
@@ -283,34 +336,34 @@ async function streamResponseWithReasoning(
 async function runInteractiveRepl() {
   printBanner();
   const sys = await initJarvisSystem();
-  const rl = readline.createInterface({
+  const createInput = () => readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: true,
   });
+  let rl = createInput();
+  let terminalViewOpen = false;
 
   const session = sys.sessionStore.createSession('CLI Session');
   let history: Message[] = [];
   let activeReasoningEffort: 'low' | 'medium' | 'high' | undefined = undefined;
 
-  // Background Research Mission Completion Listener
-  sys.researchEngine.on('completed', (resSession) => {
-    process.stdout.write(
-      `\n\n${c.green}${c.bold}🔔 J.A.R.V.I.S. Research Mission Complete:${c.reset} "${resSession.topic}"\n` +
-      `  • Markdown Report: ${c.cyan}${resSession.reportPath || 'Saved'}${c.reset}\n` +
-      (resSession.pdfPath ? `  • Compiled PDF:    ${c.cyan}${resSession.pdfPath}${c.reset}\n` : '') +
-      `  • Findings:        ${c.green}${resSession.findings?.length || 0} facts verified & cross-referenced${c.reset}\n\n` +
-      `${c.cyan}${c.bold}jarvis${c.reset} ${c.gray}❯${c.reset} `
-    );
-  });
-
-  sys.researchEngine.on('failed', ({ session: resSession, error }) => {
-    process.stdout.write(
-      `\n\n${c.red}${c.bold}⚠️ J.A.R.V.I.S. Research Mission Failed:${c.reset} "${resSession.topic}"\n` +
-      `  • Error: ${c.yellow}${error}${c.reset}\n\n` +
-      `${c.cyan}${c.bold}jarvis${c.reset} ${c.gray}❯${c.reset} `
-    );
-  });
+  const notified = new Map((await sys.researchEngine.listMissions(100))
+    .map(mission => [mission.id, mission.status]));
+  const researchNotifications = setInterval(() => {
+    if (terminalViewOpen) return;
+    void sys.researchEngine.listMissions(100).then(missions => {
+      if (terminalViewOpen) return;
+      for (const mission of missions) {
+        const previous = notified.get(mission.id);
+        notified.set(mission.id, mission.status);
+        if (previous === mission.status) continue;
+        if (mission.status === 'completed') printResearchText(`\nResearch completed · ${mission.id} · ${mission.reportPath ?? mission.topic}`);
+        if (mission.status === 'failed') printResearchText(`\nResearch failed · ${mission.id} · ${mission.error ?? mission.topic}`);
+      }
+    }).catch(error => console.error(String(error)));
+  }, 2500);
+  researchNotifications.unref();
 
   while (true) {
     let input = '';
@@ -332,11 +385,25 @@ async function runInteractiveRepl() {
       queryEffort = 'high';
       console.log(`\n${c.magenta}🧠 Deep Reasoning Matrix Engaged${c.reset} ${c.dim}(reasoning_effort: high)${c.reset}\n`);
     } else if (trimmed.startsWith('/')) {
+      const dashboard = researchDashboardCommand(trimmed);
+      const view = isResearchDocumentHelp(trimmed) ? showResearchDocumentHelp
+        : dashboard ? () => showResearchDashboard(sys.researchEngine, dashboard.id) : undefined;
+      if (view && canUseTerminalView()) {
+        terminalViewOpen = true;
+        rl.close();
+        try {
+          await view();
+        } catch (error) {
+          console.error(String(error));
+        } finally {
+          terminalViewOpen = false;
+          rl = createInput();
+        }
+        continue;
+      }
       const handled = await handleSlashCommand(trimmed, sys, rl, history, {
         getReasoning: () => activeReasoningEffort,
-        setReasoning: (val) => {
-          activeReasoningEffort = val;
-        },
+        setReasoning: val => { activeReasoningEffort = val; },
       });
       if (handled === 'EXIT') break;
       if (handled === 'CLEARED') history = [];
@@ -435,6 +502,7 @@ async function runInteractiveRepl() {
     }
   }
 
+  clearInterval(researchNotifications);
   rl.close();
   console.log(`\n${c.gray}Good day, sir.${c.reset}`);
   process.exit(0);
@@ -571,9 +639,22 @@ async function handleSlashCommand(
     case '/help':
       console.log(`
 ${c.bold}Signature Agent Capabilities:${c.reset}
-  ${c.brightGreen}/research <topic>${c.reset}          Dispatch long-running autonomous research mission to background
-  ${c.brightGreen}/research status [id]${c.reset}      Inspect active research progress, steps, & verified findings
+  ${c.brightGreen}/research <topic>${c.reset}          Start a background research mission
+  ${c.brightGreen}/research -d <topic>${c.reset}       Investigate until the evidence is sufficient or leads are exhausted
+  ${c.brightGreen}/research dashboard [id]${c.reset}   Open the interactive research monitor
+  ${c.brightGreen}/research status [id]${c.reset}      Inspect progress, steps, findings, and model usage
   ${c.brightGreen}/research list${c.reset}             List all recent background research sessions
+  ${c.brightGreen}/research pause|resume <id>${c.reset}  Pause or resume a research mission
+  ${c.brightGreen}/research stop <id>${c.reset}        Stop and publish the latest checkpoint
+  ${c.brightGreen}/research report <id>${c.reset}      Read the report or current findings
+  ${c.brightGreen}/research publish <id>${c.reset}     Export a paused, stopped, or completed briefing
+  ${c.brightGreen}/research diagnose <id> [--trace]${c.reset} Inspect source failures, branch decisions, and model calls
+  ${c.brightGreen}/research steer <id> <instruction>${c.reset}  Redirect a deep mission
+  ${c.brightGreen}/research fact-check <id> <claim>${c.reset}    Recheck a finding with original sources
+  ${c.brightGreen}/research sources <id> [source]${c.reset}      Inspect retrieved sources
+  ${c.brightGreen}/research reopen <id> [instruction]${c.reset}  Continue a finished deep mission
+  ${c.brightGreen}/research doc <operation> <id>${c.reset}      List, create, edit, merge, trim, or export research documents
+  ${c.brightGreen}/research doc help${c.reset}        Open the tabbed guide to research document commands
   ${c.magenta}/reason [low|med|high|auto]${c.reset} Adjust reasoning effort & thinking token depth
   ${c.magenta}/deep <query>${c.reset}              Run query with deep analytical investigation and maximum reasoning
   ${c.magenta}/btw <question>${c.reset}           Ephemeral side question in a floating card (leaves main context clean)
@@ -741,13 +822,24 @@ ${c.bold}Natural Language Agent Commands:${c.reset}
 
 // ─── Research Command Handler ─────────────────────────────────────────────────
 
+function researchDashboardCommand(input: string): { id?: string } | undefined {
+  const match = /^\/(?:research|bg)\s+dashboard(?:\s+(.+))?$/i.exec(input);
+  return match ? { id: match[1]?.trim() } : undefined;
+}
+
 async function handleResearchCommand(
   rawInput: string,
   engine: ResearchEngine
 ): Promise<void> {
-  const parts = rawInput.trim().split(' ');
+  const parts = rawInput.trim().split(/\s+/);
   const subCmd = parts[0]?.toLowerCase();
-  const rest = parts.slice(1).join(' ').trim();
+  const rest = rawInput.trim().slice(parts[0]?.length ?? 0).trim();
+
+  if (subCmd === 'dashboard') {
+    await showResearchDashboard(engine, rest || undefined);
+    return;
+  }
+  if (await handleResearchWorkspaceCommand(subCmd, rest, engine)) return;
 
   if (!rawInput.trim() || subCmd === 'list') {
     const missions = await engine.listMissions(10);
@@ -759,12 +851,12 @@ async function handleResearchCommand(
     console.log(`\n${c.bold}Autonomous Research Missions:${c.reset}`);
     for (const m of missions) {
       const statusColor = m.status === 'completed' ? c.green : m.status === 'in_progress' ? c.cyan : m.status === 'paused' ? c.yellow : c.red;
-      const bar = renderProgressBar(m.progress);
-      console.log(`  ${c.dim}${m.id}${c.reset} [${statusColor}${m.status.toUpperCase()}${c.reset}] ${bar} ${c.bold}${m.topic.slice(0, 45)}${c.reset}`);
+      const bar = m.depth === 'deep' ? '[deep]' : renderProgressBar(m.progress);
+      console.log(`  ${c.dim}${m.id}${c.reset} [${statusColor}${researchState(m).toUpperCase()}${c.reset}] ${bar} ${c.bold}${m.topic.slice(0, 45)}${c.reset}`);
       if (m.currentStepTitle && m.status === 'in_progress') {
         console.log(`    ${c.dim}↳ Active: ${m.currentStepTitle}${c.reset}`);
       }
-      if (m.reportPath && m.status === 'completed') {
+      if (m.reportPath) {
         console.log(`    ${c.dim}↳ Report: ${m.reportPath}${c.reset}`);
       }
     }
@@ -783,8 +875,17 @@ async function handleResearchCommand(
     const statusColor = session.status === 'completed' ? c.green : session.status === 'in_progress' ? c.cyan : c.yellow;
     console.log(`\n${c.bold}Mission Telemetry:${c.reset} ${c.dim}${session.id}${c.reset}`);
     console.log(`  • Topic:    ${c.bold}${session.topic}${c.reset}`);
-    console.log(`  • State:    [${statusColor}${session.status.toUpperCase()}${c.reset}] ${renderProgressBar(session.progress)}`);
-    console.log(`  • Findings: ${c.cyan}${session.findings?.length || 0} facts verified${c.reset}`);
+    const state = engine.getResearchState(session.id);
+    console.log(`  • State:    [${statusColor}${researchState(session).toUpperCase()}${c.reset}] ${session.depth === 'deep' ? 'Deep research' : renderProgressBar(session.progress)}`);
+    if (state) {
+      const answered = state.questions.filter(question => question.status === 'answered').length;
+      console.log(`  • Coverage: ${answered}/${state.questions.length} questions answered · ${state.sources.length} source records`);
+      if (state.stopReason) printResearchText(`  • Finish: ${state.stopReason}`);
+    }
+    console.log(`  • Findings: ${c.cyan}${session.findings.length} collected${c.reset}`);
+    if (session.retryAt && session.retryAt > Date.now()) console.log(`  • Next retry: ${new Date(session.retryAt).toLocaleString()}`);
+    if (session.error) console.log(`  • Error: ${session.error}`);
+    for (const line of researchUsageSummary(engine.getUsage(session.id))) console.log(`  • ${line}`);
     if (activeStep) {
       console.log(`  • Current:  ${c.brightCyan}Step ${activeStep.stepNumber}/${session.totalSteps}:${c.reset} ${activeStep.title}`);
     }
@@ -803,6 +904,43 @@ async function handleResearchCommand(
       }
     }
     console.log();
+    return;
+  }
+
+  if (subCmd === 'report') {
+    if (!rest) {
+      console.log('Usage: /research report <mission-id>');
+      return;
+    }
+    const [id, document] = rest.split(/\s+/, 2);
+    const { session } = await engine.getStatus(id);
+    if (!session) {
+      console.log(`Research mission ${rest} was not found.`);
+      return;
+    }
+    if (document) {
+      await handleResearchWorkspaceCommand('doc', `show ${id} ${document}`, engine);
+      return;
+    }
+    const findings = session.findings.map(finding => `- ${finding.claim} (${finding.url ?? finding.source})`);
+    printResearchText(engine.getWorkingReport(session) || ['Working findings', ...(findings.length ? findings : ['No findings committed yet.'])].join('\n'));
+    if (session.reportPath) console.log(`Markdown: ${session.reportPath}`);
+    if (session.pdfPath) console.log(`PDF: ${session.pdfPath}`);
+    return;
+  }
+
+  if (subCmd === 'stop') {
+    if (!rest) {
+      console.log('Usage: /research stop <mission-id>');
+      return;
+    }
+    try {
+      const stopped = await engine.stopMission(rest);
+      const report = stopped ? (await engine.getStatus(rest)).session?.reportPath : undefined;
+      console.log(stopped ? `Stopped research mission ${rest}. Checkpoint saved to ${report}.` : `Cannot stop mission ${rest} in its current state.`);
+    } catch (error) {
+      console.error(String(error));
+    }
     return;
   }
 
@@ -841,19 +979,26 @@ async function handleResearchCommand(
   }
 
   // Otherwise treat entire rawInput as research topic
-  const session = await engine.startMission(rawInput.trim());
+  const deep = /^(?:-d|--depth\s+deep)(?:\s+--(?=\s|$))?(?:\s+|$)/i.exec(rawInput.trim());
+  const topic = deep ? rawInput.trim().slice(deep[0].length).trim() : rawInput.trim();
+  if (!topic || (subCmd === '--depth' && !deep)) {
+    console.log('Usage: /research -d <topic>');
+    return;
+  }
+  const session = await engine.startMission(topic, deep ? 'deep' : 'brief');
 
   console.log(`\n${c.cyan}┌─────────────────────────────────────────────────────────────┐${c.reset}`);
   console.log(`${c.cyan}│${c.reset} ${c.bold}${c.brightCyan}🚀 Autonomous Research Matrix Dispatched${c.reset}                   ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}│${c.reset}                                                             ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}│${c.reset}  • Mission ID:  ${c.brightYellow}${session.id.padEnd(42)}${c.reset} ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}│${c.reset}  • Topic:       ${c.bold}"${session.topic.slice(0, 39).padEnd(39)}"${c.reset} ${c.cyan}│${c.reset}`);
-  console.log(`${c.cyan}│${c.reset}  • Heartbeat:   ${c.green}TickEngine active (3.5s budget loop)${c.reset}          ${c.cyan}│${c.reset}`);
-  console.log(`${c.cyan}│${c.reset}  • Providers:   ${c.dim}Free tier only (Gemini / Groq / Mistral)${c.reset}      ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Heartbeat:   ${c.green}Tick engine active (3.5-second interval)${c.reset}     ${c.cyan}│${c.reset}`);
+  console.log(`${c.cyan}│${c.reset}  • Providers:   ${c.dim}Configured free model providers${c.reset}              ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}│${c.reset}  • Deliverable: ${c.cyan}~/Downloads (Markdown + PDF)${c.reset}                 ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}│${c.reset}                                                             ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}│${c.reset}  ${c.dim}JARVIS remains unblocked. Chat as normal or run /research status.${c.reset} ${c.cyan}│${c.reset}`);
   console.log(`${c.cyan}└─────────────────────────────────────────────────────────────┘${c.reset}\n`);
+  console.log(`Open the dashboard with /research dashboard ${session.id}\n`);
 }
 
 function renderProgressBar(pct: number): string {
@@ -905,10 +1050,23 @@ async function runOneShot(prompt: string) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === '--research-worker' && args[1]) {
+    await runResearchWorker(args[1]);
+    return;
+  }
   if (args.length > 0) {
     const fullInput = args.join(' ').trim();
     if (fullInput.startsWith('/')) {
+      if (isResearchDocumentHelp(fullInput)) {
+        await showResearchDocumentHelp();
+        return;
+      }
       const sys = await initJarvisSystem();
+      const dashboard = researchDashboardCommand(fullInput);
+      if (dashboard) {
+        await showResearchDashboard(sys.researchEngine, dashboard.id);
+        process.exit(0);
+      }
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       await handleSlashCommand(fullInput, sys, rl, []);
       rl.close();

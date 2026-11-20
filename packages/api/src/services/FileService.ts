@@ -1,7 +1,7 @@
 import { writeFileSync, readFileSync, readdirSync, statSync, mkdirSync, existsSync } from 'fs';
 import { resolve, dirname, basename, extname, isAbsolute } from 'path';
 import { homedir } from 'os';
-import { PdfService } from './PdfService.js';
+import { PdfService, type PdfOptions } from './PdfService.js';
 
 export interface FileWriteResult {
   path: string;
@@ -83,13 +83,14 @@ export class FileService {
     filename: string,
     markdownContent: string,
     targetDir?: string,
-    title?: string
+    title?: string,
+    theme?: PdfOptions['theme'],
   ): Promise<FileWriteResult> {
     const cleanName = filename.endsWith('.pdf') ? filename : `${filename}.pdf`;
     const fullPath = this.resolveTargetFile(cleanName, targetDir);
 
     const docTitle = title || basename(cleanName, '.pdf').replace(/[-_]/g, ' ');
-    await this.pdfService.markdownToPdf(markdownContent, fullPath, { title: docTitle });
+    await this.pdfService.markdownToPdf(markdownContent, fullPath, { title: docTitle, theme });
 
     const stats = statSync(fullPath);
     return {

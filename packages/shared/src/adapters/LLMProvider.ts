@@ -17,6 +17,12 @@ export type TaskType = 'general' | 'coding' | 'reasoning' | 'creative' | 'quick'
 /** Reasoning effort levels supported by thinking/reasoning models */
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
+export interface LLMTokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
 export interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
@@ -29,6 +35,9 @@ export interface LLMOptions {
   thinkingBudget?: number;
   /** Restrict provider selection strictly to free / local tiers */
   freeOnly?: boolean;
+  /** Report usage for an individually tracked request. The caller owns retries. */
+  onUsage?: (usage: LLMTokenUsage) => void;
+  signal?: AbortSignal;
 }
 
 export interface LLMCapabilities {

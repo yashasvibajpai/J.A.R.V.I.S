@@ -129,10 +129,11 @@ export function buildProviderRegistry(): ProviderProfile[] {
     console.log('[registry] ✓ Mistral (Codestral + mistral-embed) registered — free tier');
   }
 
-  // OpenRouter — free model router (https://openrouter.ai/docs/guides/routing/routers/free-router)
+  // OpenRouter — free router by default, with an optional model override
   if (process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim()) {
     const openrouterModel = process.env.OPENROUTER_MODEL || 'openrouter/free';
     const modelId = openrouterModel.includes('/') ? openrouterModel.split('/')[1] : openrouterModel;
+    const tier = openrouterModel === 'openrouter/free' || openrouterModel.endsWith(':free') ? 'free' : 'paid';
     profiles.push({
       provider: new OpenAICompatibleAdapter({
         apiKey: process.env.OPENROUTER_API_KEY.trim(),
@@ -151,10 +152,10 @@ export function buildProviderRegistry(): ProviderProfile[] {
       scores: { general: 7, coding: 6, reasoning: 6, creative: 6, quick: 7, tool_use: 5, embedding: 0 },
       limits: { rpm: 20, rpd: 200, tokensPerDay: 1_000_000 },
       state: freshState(),
-      tier: 'free',
+      tier,
       contextWindow: 128_000,
     });
-    console.log(`[registry] ✓ OpenRouter (${openrouterModel}) registered — free tier fallback`);
+    console.log(`[registry] ✓ OpenRouter (${openrouterModel}) registered — ${tier} tier`);
   }
 
   // Ollama Cloud — large models on remote infrastructure
@@ -224,6 +225,19 @@ export function buildProviderRegistry(): ProviderProfile[] {
   }
 
   // ─── Summary ────────────────────────────────────────────────────────────
+
+  for (const profile of profiles) {
+    if (profile.tier !== 'free') continue;
+    const prefix = `JARVIS_${profile.providerId.toUpperCase().replaceAll('-', '_')}_`;
+    const limits = [['RPM', 'rpm'], ['RPD', 'rpd'], ['TPM', 'tokensPerMinute'], ['TPD', 'tokensPerDay']] as const;
+    for (const [suffix, key] of limits) {
+      const raw = process.env[prefix + suffix];
+      if (!raw?.trim()) continue;
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${prefix + suffix} must be a positive integer`);
+      profile.limits[key] = value;
+    }
+  }
 
   const freeTierCount = profiles.filter(p => p.tier === 'free').length;
   const localCount = profiles.filter(p => p.tier === 'local').length;
